@@ -68,7 +68,7 @@ contract HedgedPerpTest is Test {
         perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100); // max 1 BTC per hedge
         vm.etch(WRITER, address(new WriterRecorder()).code);
         _setPrice(800_000); // 80,000.0
-        _setCore(false, 0, 0, 0);
+        _setCore(true, 0, 0, 0);
 
         usdc.mint(keeper, 1_000_000e6);
         usdc.approve(address(perp), type(uint256).max);
@@ -155,7 +155,7 @@ contract HedgedPerpTest is Test {
         uint256 id = perp.requestOpen(true, 100e6, 10);
         vm.expectRevert(HedgedPerp.TooEarly.selector);
         perp.settleOpen(id);
-        vm.warp(block.timestamp + 121);
+        vm.warp(block.timestamp + 16);
         vm.expectRevert(HedgedPerp.TooLate.selector);
         perp.settleOpen(id);
 
@@ -166,13 +166,19 @@ contract HedgedPerpTest is Test {
         assertEq(perp.held(), 0);
     }
 
-    function test_onlyKeeperSettles() public {
+    /// Anyone settles, so the keeper cannot wait for a price it likes (review r1).
+    function test_anyoneSettles() public {
         vm.prank(alice);
         uint256 id = perp.requestOpen(true, 100e6, 10);
         vm.warp(block.timestamp + 2);
-        vm.prank(alice);
-        vm.expectRevert(HedgedPerp.NotKeeper.selector);
+        vm.prank(bob);
         perp.settleOpen(id);
+        vm.prank(alice);
+        perp.requestClose(id);
+        vm.warp(block.timestamp + 2);
+        vm.prank(alice);
+        perp.settleClose(id);
+        assertEq(perp.openCount(), 0);
     }
 
     function test_closeWithProfitCreditsThenClaims() public {
@@ -208,7 +214,7 @@ contract HedgedPerpTest is Test {
         uint256 id = _open(alice, true, 100e6, 10);
         vm.prank(alice);
         perp.requestClose(id);
-        vm.warp(block.timestamp + 121);
+        vm.warp(block.timestamp + 16);
         vm.prank(alice);
         perp.cancel(id);
         (,, HedgedPerp.State s,,,,,) = perp.positions(id);
@@ -244,11 +250,17 @@ contract HedgedPerpTest is Test {
         perp.settleOpen(id);
     }
 
-    function test_coreValueCountsAsCapital() public {
+    /// Core money is the hedge's: it never backs what traders can be owed (review r1).
+    function test_coreValueIsNotCapital() public {
         perp.defund(10_000e6);
         _setCore(true, 0, 1_000e6, 600e8); // perp 1,000 + spot 600
         assertEq(perp.coreValue(), 1_600e6);
-        _open(alice, true, 300e6, 10); // cap 1,500 <= 1,600 + 3 fee
+        assertEq(perp.capital(), 0);
+        vm.prank(alice);
+        uint256 id = perp.requestOpen(true, 300e6, 10);
+        vm.warp(block.timestamp + 2);
+        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.Undercapitalised.selector, 3e6, 1_500e6));
+        perp.settleOpen(id);
     }
 
     function test_defundKeepsMaxProfits() public {
@@ -263,7 +275,7 @@ contract HedgedPerpTest is Test {
         perp.defund(10_000e6);
         vm.prank(alice);
         perp.requestOpen(true, 100e6, 10);
-        assertEq(perp.freeEvm(), 0);
+        assertEq(perp.capital(), 0);
         vm.expectRevert(HedgedPerp.BadRequest.selector);
         perp.defund(1);
     }
@@ -432,7 +444,8 @@ contract HedgedPerpTest is Test {
         HedgedPerp loose = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 0, 0, 0);
         usdc.approve(address(loose), type(uint256).max);
         loose.fund(10_000e6);
-        vm.mockCall(USER_EXISTS, abi.encode(address(loose)), abi.encode(false));
+        vm.mockCall(USER_EXISTS, abi.encode(address(loose)), abi.encode(true));
+        vm.mockCall(POSITION, abi.encode(address(loose), uint16(BTC)), abi.encode(Core.Position(0, 0, 0, 20, false)));
         vm.prank(alice);
         usdc.approve(address(loose), type(uint256).max);
         vm.prank(alice);
@@ -442,6 +455,14 @@ contract HedgedPerpTest is Test {
         _setQuote(800_000, 800_000, 799_000, 810_000); // ask 1.25% above the oracle
         vm.expectRevert(abi.encodeWithSelector(HedgedPerp.BadQuote.selector, 81_243e18, 80_000e18));
         loose.hedge();
+    }
+
+    function test_hedgeNeedsACoreAccount() public {
+        _open(alice, true, 1_000e6, 10);
+        _setCore(false, 0, 0, 0);
+        vm.expectRevert(HedgedPerp.NoCoreAccount.selector);
+        perp.hedge();
+        assertEq(WriterRecorder(WRITER).count(), 0);
     }
 
     function test_onlyKeeperHedges() public {

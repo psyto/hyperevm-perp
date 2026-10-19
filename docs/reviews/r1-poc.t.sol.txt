@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+// Reuse the project fixture, including its mocks at the real precompile addresses.
+import {HedgedPerpTest, WriterRecorder} from "../HedgedPerp.t.sol";
+import {HedgedPerp} from "../../src/HedgedPerp.sol";
+
+contract HedgedPerpRound1PoC is HedgedPerpTest {
+    /// The keeper is the pool's counterparty and can ignore a profitable close
+    /// throughout the settlement window, then take the loss-making price just
+    /// before expiry.  The trader has no way to execute at the requested price.
+    function test_PoC_keeperHasA120SecondFreeOptionOnEveryClose() public {
+        uint256 id = _open(alice, true, 100e6, 10); // entry = $80,000
+
+        _setPrice(840_000); // at the request, closing pays 149 USDC
+        vm.prank(alice);
+        perp.requestClose(id);
+
+        vm.warp(block.timestamp + 119);
+        _setPrice(760_000); // keeper waits for the price favorable to the pool
+        perp.settleClose(id);
+
+        // The same requested close is settled for a 51 USDC loss instead.
+        assertEq(perp.credit(alice), 49e6);
+    }
+
+    /// CoreWriter accepts the EVM call, but HyperCore rejects an action from an
+    /// account that did not exist before the EVM block. hedge() nevertheless
+    /// reports a hedge and starts its quiet period.
+    function test_PoC_hedgeClaimsSuccessForAnUnactivatedCoreAccount() public {
+        // setUp deliberately leaves the pool account nonexistent on Core.
+        _open(alice, true, 1_000e6, 10);
+        perp.hedge();
+
+        assertEq(WriterRecorder(WRITER).count(), 1, "only an asynchronous action was queued");
+        assertEq(perp.coreLots(), 0, "there cannot be a Core fill from a nonexistent account");
+        assertGt(perp.hedgeQuietUntil(), block.timestamp, "retry is blocked despite certain rejection");
+    }
+
+    /// CoreWriter orders are delayed.  A close can remove the trader exposure
+    /// before a previously submitted hedge arrives on Core.  Once that IOC
+    /// fills, the pool owns a naked position and the contract forbids the
+    /// corrective IOC until the original 30 second quiet period expires.
+    function test_PoC_delayedHedgeBecomesNakedAfterClose() public {
+        uint256 id = _open(alice, true, 1_000e6, 10); // target = +0.125 BTC
+        perp.hedge(); // buy is merely queued; it has not reached HyperCore yet
+        uint64 quietUntil = perp.hedgeQuietUntil();
+
+        _close(alice, id); // target is now zero before the queued buy executes
+        assertEq(perp.targetLots(), 0);
+
+        // Model the asynchronously executed IOC filling after the EVM close.
+        _setCore(true, 12_500, 500e6, 0);
+        assertEq(perp.coreLots(), 12_500, "the pool is now long 0.125 BTC with no trader exposure");
+        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.HedgeQuiet.selector, quietUntil));
+        perp.hedge();
+
+        vm.warp(quietUntil);
+        perp.hedge();
+        (, bool isBuy,,, ,) = _lastOrder();
+        assertFalse(isBuy, "the eventually permitted order merely starts unwinding the stale buy");
+    }
+
+    /// A stale fill can be worse than a temporary tracking error: after A closes
+    /// and B takes the opposite side, the delayed long hedge is exactly the
+    /// wrong position.  A 50% move wipes the Core reserve, while B is owed the
+    /// five-times-margin profit cap.  The EVM balance is then unable to honour
+    /// B's credit.
+    function test_PoC_staleHedgeCanConsumeTheReserveNeededForAnotherTrader() public {
+        perp.defund(10_000e6);
+        _setCore(true, 0, 5_000e6, 0); // all loss reserve is on Core
+
+        uint256 aliceId = _open(alice, true, 1_000e6, 10);
+        perp.hedge(); // queued buy of A's +0.125 BTC; target was +12,500 lots
+
+        _close(alice, aliceId); // A is owed 990 USDC, and target is zero
+        uint256 bobId = _open(bob, false, 1_000e6, 10); // new target is -12,500 lots
+
+        // The old buy reaches Core only now. It is the opposite of B's hedge.
+        _setCore(true, 12_500, 5_000e6, 0);
+        assertEq(perp.targetLots(), -12_500);
+        assertEq(perp.coreLots(), 12_500);
+
+        // BTC halves before the quiet period allows a corrective sell. The
+        // wrong Core long loses the 5,000-USDC reserve and is liquidated.
+        _setCore(true, 0, 0, 0);
+        _setPrice(400_000);
+        _close(bob, bobId);
+        assertEq(perp.credit(bob), 5_990e6, "B receives the capped profit credit");
+
+        vm.prank(bob);
+        vm.expectRevert();
+        perp.claim(); // only the two traders' roughly 2,020 USDC is on EVM
+    }
+}

@@ -1,0 +1,15 @@
+You are Codex, reviewing code Claude (another model) wrote. Do not defer to it. Round 1.
+
+This repo (worktree) is a perp on HyperEVM: traders post USDC (6 decimals, ERC20) margin and go long or short one HyperCore perp (BTC, testnet index 3, szDecimals 5); the pool is every trader's counterparty and hedges traders' net position with its own position on HyperCore, sent through CoreWriter (0x3333…, fire-and-forget, runs after the EVM block). One contract, src/HedgedPerp.sol; docs/design.md describes it. Core helpers come from the pinned lib/hyperevm-amm/src/Core.sol; prices from lib/hl-price-guard (HLPriceGuard.read for settles; bare oracle/mark for liquidation). Tests in test/HedgedPerp.t.sol mock the precompiles and CoreWriter at their real addresses.
+
+Review by breaking: for every finding, write a failing Foundry test under test/poc/ that demonstrates it, run `forge test`, report the numbers. Only add files under test/poc/; do not edit src/ or existing tests.
+
+Attack, in order of value:
+1. Loss of trader or pool funds: PnL and payout math (units = notional*1e30/price, value = units*price/1e30, fees rounded up, the 5x profit cap, payout floor at 0), the `held` / `owed` / `credit` accounting (can any path make held or owed wrong, underflow, or let claim() or defund() pay out traders' margins), cancel() refunds, a position id reused or touched after delete.
+2. Solvency rule: `capital() >= maxProfits` at settleOpen and defund. Can capital be inflated (Core value read via 0x80F accountValue + 0x801 spot USDC, donations, a position closing in the same block) to open more than the pool can pay, or to defund money traders will need? Is maxProfits a real upper bound on what open positions can be paid?
+3. Liquidation: price better for the trader (max(oracle, mark) for longs, min for shorts), no other checks. Can a healthy position be liquidated, can a liquidatable one avoid it, can the caller's reward be gamed, does liquidating during Closing break settleClose or cancel?
+4. The hedge: targetLots rounding, the gap read from 0x800 szi (szDecimals units), the IOC limit (slip beyond touch, within 1% of oracle, _toTick for perps: 5 significant figures with integers always allowed, at most 6 - szDecimals decimals), sz in 1e8, the 30 s quiet between orders, MIN_HEDGE_USD. Can the keeper's own hedge be made to lose money for the pool beyond the slippage bound, or be blocked? Is anything about HyperCore perp order semantics wrong (account must hold perp margin; a default Core account's leverage; reduce-only; an IOC that partly fills)? Cite sources.
+5. Settle timing: the keeper settles 2-120 s after a request at the checked oracle. Does the trader still have an option on the price? Does the keeper? What happens when the price check fails for longer than the window?
+6. Units and decimals throughout (Core USDC 8 decimals vs EVM 6, accountValue USD*1e6 signed, coreToEvm multiple of 100), and Core semantics the code gets wrong.
+
+Output: findings with severity (critical/high/medium/low), PoC name and result, root cause, concrete fix. End with exactly one line: `VERDICT: APPROVE` or `VERDICT: CHANGES`.

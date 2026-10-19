@@ -18,13 +18,16 @@ interface IToken {
 /// - Traders' books live here and settle synchronously. The hedge is the only thing on Core, and
 ///   the contract never assumes an order filled: hedge() reads the Core position (0x800) each
 ///   time and orders the gap.
-/// - Opens and closes are requested by the trader and settled by the keeper at the checked oracle
-///   within SETTLE_WINDOW, so a trader cannot pick the price; after the window the trader can
-///   cancel.
+/// - Opens and closes are requested by the trader and settled by anyone at the checked oracle
+///   SETTLE_DELAY to SETTLE_WINDOW seconds later. Within one block the price is one value, so
+///   when both sides are live the first block settles it; neither side gets a free option
+///   (review r1). After the window the trader can cancel.
 /// - Liquidation never refuses a price: it uses whichever of the oracle and the mark is better
 ///   for the trader, and no other check (hyperevm-lend review r1).
-/// - One liquidity provider in this version, the keeper. The pool must be able to pay every open
-///   position's largest possible profit without the hedge (`capital() >= maxProfits`).
+/// - One liquidity provider in this version, the keeper. The pool's EVM USDC alone must cover
+///   every open position's largest possible profit (`capital() >= maxProfits`). Core money is
+///   the hedge's and is not counted: an order that runs late can leave a wrong-way position on
+///   Core, and that must never reach what traders are owed (review r1).
 contract HedgedPerp {
     uint256 internal constant BPS = 10_000;
 
@@ -34,7 +37,7 @@ contract HedgedPerp {
     uint256 public constant MAX_PROFIT_X = 5; // a position's profit is capped at 5x its margin
     uint256 public constant MIN_MARGIN = 1e6; // 1 USDC
     uint64 public constant SETTLE_DELAY = 2; // seconds; the keeper settles at a price after the request
-    uint64 public constant SETTLE_WINDOW = 120; // seconds; after this the trader can cancel
+    uint64 public constant SETTLE_WINDOW = 15; // seconds; after this the trader can cancel
     uint256 public constant HEDGE_SLIP_BPS = 30; // IOC limit beyond the best bid/ask
     uint256 public constant HEDGE_MAX_ORACLE_BPS = 100; // and never further than this from the oracle
     uint64 public constant HEDGE_QUIET = 30; // seconds between hedge orders (the EVM is not told when one runs)
@@ -100,6 +103,7 @@ contract HedgedPerp {
     error NoPrice();
     error Undercapitalised(uint256 capital, uint256 required);
     error NothingToHedge();
+    error NoCoreAccount();
     error HedgeTooSmall(uint256 usd);
     error HedgeQuiet(uint64 until);
     error BadQuote(uint256 limit, uint256 oracle);
@@ -180,9 +184,9 @@ contract HedgedPerp {
         emit Claimed(msg.sender, amount);
     }
 
-    // ---------------------------------------------------------------- keeper: settle
+    // ---------------------------------------------------------------- anyone: settle
 
-    function settleOpen(uint256 id) external onlyKeeper {
+    function settleOpen(uint256 id) external {
         Position storage p = positions[id];
         if (p.state != State.Opening) revert BadState();
         _checkWindow(p.requestedAt);
@@ -202,7 +206,7 @@ contract HedgedPerp {
         emit Opened(id, price, units);
     }
 
-    function settleClose(uint256 id) external onlyKeeper {
+    function settleClose(uint256 id) external {
         Position storage p = positions[id];
         if (p.state != State.Closing) revert BadState();
         _checkWindow(p.requestedAt);
@@ -241,6 +245,8 @@ contract HedgedPerp {
     /// order from going out before the first has run.
     function hedge() external onlyKeeper returns (int256 sent) {
         if (block.timestamp < hedgeQuietUntil) revert HedgeQuiet(hedgeQuietUntil);
+        // Core drops actions from an account that does not exist yet (review r1)
+        if (!Core.userExists(address(this))) revert NoCoreAccount();
         int256 target = targetLots();
         int256 cur = coreLots();
         int256 gap = target - cur;
@@ -268,9 +274,9 @@ contract HedgedPerp {
 
     /// Only from the pool's own EVM USDC, and only while the rest still covers maxProfits.
     function defund(uint256 amount) external onlyKeeper {
-        uint256 free = freeEvm();
-        if (amount == 0 || amount > free) revert BadRequest();
-        uint256 c = capital() - amount;
+        uint256 c = capital();
+        if (amount == 0 || amount > c) revert BadRequest();
+        c -= amount;
         if (c < maxProfits) revert Undercapitalised(c, maxProfits);
         _send(keeper, amount);
         emit Defunded(amount);
@@ -323,15 +329,8 @@ contract HedgedPerp {
         return Core.position(address(this), uint16(perpIndex)).szi;
     }
 
-    /// The pool's EVM USDC that is neither traders' margin nor owed to them. 0 when short.
-    function freeEvm() public view returns (uint256) {
-        uint256 bal = usdc.balanceOf(address(this));
-        return bal > held + owed ? bal - held - owed : 0;
-    }
-
     /// What the pool's Core account is worth in USDC: perp account value (at the mark, with the
-    /// hedge's unrealised PnL) plus spot USDC. USDC in transit between the EVM and Core is in
-    /// neither balance, so this undercounts while it moves.
+    /// hedge's unrealised PnL) plus spot USDC. Informational: not part of capital().
     function coreValue() public view returns (uint256) {
         if (!Core.userExists(address(this))) return 0;
         int64 perp = Core.marginSummary(0, address(this)).accountValue;
@@ -339,10 +338,10 @@ contract HedgedPerp {
         return (perp > 0 ? uint256(int256(perp)) : 0) + spot;
     }
 
-    /// The pool's own money on both sides. Owed credits count against it even when the EVM
-    /// balance is short.
+    /// The pool's own EVM USDC: neither traders' margin nor owed to them. Hedge profit counts
+    /// once the keeper has brought it over (coreToEvm).
     function capital() public view returns (uint256) {
-        uint256 bal = usdc.balanceOf(address(this)) + coreValue();
+        uint256 bal = usdc.balanceOf(address(this));
         return bal > held + owed ? bal - held - owed : 0;
     }
 
