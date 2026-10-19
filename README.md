@@ -116,6 +116,8 @@ Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 ## Next
 - A full arithmetic audit round, as hyperevm-lend's r8 did.
 - Funding passed through to traders, accrued per second.
+- A keeper that polls `orderStatus` and acknowledges by itself (by hand on testnet so far).
+- A way to send the pool's Core HYPE back to the EVM.
 
 ## Run
 ```

@@ -19,9 +19,10 @@ own BTC perp is the deepest market for that, and a HyperEVM contract can trade i
 | The hedge | the pool's Core perp account | the only place that market is |
 | Prices | Core precompiles: oracle 0x807, mark 0x806, best bid/ask 0x80e | |
 
-The contract keeps no record of the hedge. `hedge()` reads the Core position (0x800) each time
-and orders the gap between it and `targetLots()`, the traders' net position in Core lots. An
-order that never fills is ordered again next time; one that fills partly leaves a smaller gap.
+The contract keeps no record of what the hedge holds. `hedge()` reads the Core position (0x800)
+each time and orders the gap between it and `targetLots()`, the traders' net position in Core
+lots. After an order, nothing else goes out until the keeper acknowledges it (below); then an
+order that never filled is ordered again, and one that filled partly leaves a smaller gap.
 
 ## Rules
 - **Opens and closes are two-step, and anyone settles.** The trader requests; anyone settles at
@@ -52,8 +53,9 @@ order that never fills is ordered again next time; one that fills partly leaves 
   it too, an order can net back to where it started, and a timeout does not cancel an action
   already queued). So `hedge()` gives each IOC a fresh cloid and refuses while `pendingCloid` is
   set; the keeper clears it with `acknowledge(cloid)` after reading the order's status by cloid
-  from the Hyperliquid API. There is no automatic retry. See "Acknowledging an order" below. The keeper is the only liquidity provider, so acknowledging early risks
-  only its own Core money.
+  from the Hyperliquid API. There is no automatic retry. See "Acknowledging an order" below.
+  The keeper is the only liquidity provider, so acknowledging early risks only its own Core
+  money.
 - **Settles never wait for the hedge.** Making them wait (r3) let the keeper delay any settle by
   sending a hedge (r4). So the one outstanding order can run after traders' exposure moved and
   then point the wrong way, by at most its size (`maxHedgeLots`).
@@ -81,9 +83,13 @@ endpoint. Acknowledge only on a final `order.status`:
 
 Never acknowledge on `{"status":"unknownOid"}`: it is what an order still inside CoreWriter's
 delay returns too, so it cannot mean "never registered" (review r5). An order that stays unknown
-keeps `pendingCloid` set and the hedge stopped; that is the safe failure. How long a CoreWriter
-order takes to show up in `orderStatus`, and whether one Core drops before the book ever shows
-up at all, is not documented; step 3 measures it on testnet.
+keeps `pendingCloid` set and the hedge stopped; that is the safe failure.
+
+Hyperliquid does not document how long a CoreWriter order takes to show up in `orderStatus`.
+Measured on testnet (docs/step3-testnet.md, docs/step4-liquidation-and-rejections.md): every
+order was `unknownOid` for under a second and had a final status within about 2 s, all four
+outcomes alike (`filled` twice, `perpMarginRejected`, `iocCancelRejected`). A margin-rejected
+order is registered, not missing. None stayed unknown.
 
 ## Units
 | Value | Unit |
@@ -96,6 +102,16 @@ up at all, is not documented; step 3 measures it on testnet.
 
 ## Not handled (yet)
 - **Funding.** Traders pay none; the hedge pays or receives Core's funding.
-- **Basis.** Traders settle at the oracle, the hedge fills at the book and is valued at the mark.
+- **Basis.** Traders settle at the oracle, the hedge fills at the book and is valued at the mark
+  (3.6 bp on testnet's quiet BTC book, step 3).
 - **Residual.** A gap under $12 is not hedged (`MIN_HEDGE_USD`; Core's minimum order is $10).
 - **Liquidity providers other than the keeper**, which needs share pricing against open PnL.
+- **Core HYPE.** `fundCoreGas` sends HYPE to the pool's Core account for gas; nothing sends it
+  back to the EVM.
+
+## Testnet-only copy
+`src/testing/TestnetPricedPerp.sol` lets the keeper set the price, so liquidation can be run on
+testnet. Settles need the set price within 1% of the real oracle, because position sizes, and so
+the real hedge, come from it; liquidation takes the set price as is. A raw IOC function sends one
+order exactly as given, through the same one-outstanding-order slot, to measure `orderStatus`.
+The constructor refuses any chain but 998 (review r6).
