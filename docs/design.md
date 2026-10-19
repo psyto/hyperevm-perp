@@ -46,21 +46,26 @@ order that never fills is ordered again next time; one that fills partly leaves 
   the keeper brings it to the EVM.
 - **Payouts are credits.** A close or liquidation credits USDC; `claim()` pays it from the EVM
   balance. When the hedge's profit is on Core, the keeper brings it over (`coreToEvm`) first.
-- **The hedge lags, and a late order can add to the lag.** Between two `hedge()` calls the Core
-  position trails traders' exposure by whatever settled meanwhile; that gap has no size bound,
-  only a time bound (the next `hedge()`). On top of it, an order already sent can run after the
-  exposure moved and then point the wrong way, by at most that order (`maxHedgeLots`). Review r2
-  showed the earlier wording here ("off by at most that order") was wrong: Core +1 BTC, +1 BTC
-  in flight, traders reversing from +2 to −2 BTC leaves Core +2 against −2. Settles are not
-  frozen while an order is in flight, because then the keeper could hold any close back by
-  hedging. All of this falls on Core money only, never on what traders are owed.
+- **At most one unconfirmed order.** After `hedge()` sends an IOC it records the Core position
+  it started from. The order counts as seen once the position differs from that (only the
+  pool's own orders move it; a partial fill counts), and as given up after 60 s with no change
+  (an IOC that found nothing, or one Core rejected). Until then `hedge()` refuses. Review r3
+  showed the timer this replaced (one order per 10 s) let orders pile up while Core was slow:
+  three calls, three identical orders, all able to run the wrong way.
+- **Settles wait for that order, but not past their window's last 2 s.** While an order is
+  unconfirmed, `settleOpen`/`settleClose` revert `OrderInFlight` until 13 s after the request,
+  so the order runs against the exposure it was sized for. The last 2 s of each window are
+  always open, so the keeper cannot hold a close back by hedging. Liquidations never wait.
+- **What is left.** Between two `hedge()` calls the Core position trails traders' exposure by
+  whatever settled (no size bound; time-bounded by the next call). A settle in the last 2 s of a
+  window, or one after an order Core holds for over 60 s, can still leave one order running the
+  wrong way. All of this falls on Core money only, never on what traders are owed.
 - **No Core account, no hedge.** Core drops actions from an account that does not exist yet, so
   `hedge()` reverts until `userExists` (review r1).
-- **One IOC per 10 s.** The EVM cannot tell when an order has run; a second order before the
-  first runs would double it. Spot IOCs ran 347–477 ms after their block in hyperevm-amm's
-  measurements; a BTC perp IOC showed up in the position within 4 s. 10 s is a time assumption,
-  not a documented bound: an order that ran later would be doubled by the next one, by at most
-  `maxHedgeLots`, and corrected by the one after.
+- **Why 60 s.** The EVM cannot tell when an order has run. Spot IOCs ran 347–477 ms after their
+  block in hyperevm-amm's measurements; a BTC perp IOC showed up in the position within 4 s. 60 s
+  is a time assumption, not a documented bound: only an action Core holds for longer can be
+  followed by a second order.
 - **One liquidity provider** in this version: the keeper funds and defunds; `defund` only takes
   the pool's own EVM USDC and keeps `maxProfits` covered.
 

@@ -40,7 +40,8 @@ contract HedgedPerp {
     uint64 public constant SETTLE_WINDOW = 15; // seconds; after this the trader can cancel
     uint256 public constant HEDGE_SLIP_BPS = 30; // IOC limit beyond the best bid/ask
     uint256 public constant HEDGE_MAX_ORACLE_BPS = 100; // and never further than this from the oracle
-    uint64 public constant HEDGE_QUIET = 10; // seconds between hedge orders (the EVM is not told when one runs)
+    uint64 public constant ORDER_TIMEOUT = 60; // seconds an unconfirmed order blocks the next one
+    uint64 public constant SETTLE_LAST = 2; // the last seconds of a settle window never wait for an order
     uint256 public constant MIN_HEDGE_USD = 12e6; // HyperCore rejects orders under $10
 
     IToken public immutable usdc; // 6 decimals
@@ -80,7 +81,11 @@ contract HedgedPerp {
     uint256 public longUnits;
     uint256 public shortUnits;
     uint256 public maxProfits; // sum of open positions' profit caps
-    uint64 public hedgeQuietUntil;
+    // The one order that may be unconfirmed: sent at `orderSentAt` from Core position `orderFrom`.
+    // It is confirmed once the Core position differs from `orderFrom` (only this pool's orders
+    // move it), and given up on after ORDER_TIMEOUT with no change (review r3).
+    uint64 public orderSentAt;
+    int256 public orderFrom;
 
     event Requested(uint256 indexed id, address indexed owner, bool open);
     event Opened(uint256 indexed id, uint256 price, uint256 units);
@@ -105,7 +110,7 @@ contract HedgedPerp {
     error NothingToHedge();
     error NoCoreAccount();
     error HedgeTooSmall(uint256 usd);
-    error HedgeQuiet(uint64 until);
+    error OrderInFlight();
     error BadQuote(uint256 limit, uint256 oracle);
     error TransferFailed();
 
@@ -190,6 +195,7 @@ contract HedgedPerp {
         Position storage p = positions[id];
         if (p.state != State.Opening) revert BadState();
         _checkWindow(p.requestedAt);
+        _waitForOrder(p.requestedAt);
         uint256 price = guardedPrice();
         uint256 units = p.notional * 1e30 / price; // 1e6 USDC * 1e30 / 1e18 price = 1e18 units
         if (units == 0) revert BadRequest();
@@ -210,6 +216,7 @@ contract HedgedPerp {
         Position storage p = positions[id];
         if (p.state != State.Closing) revert BadState();
         _checkWindow(p.requestedAt);
+        _waitForOrder(p.requestedAt);
         uint256 price = guardedPrice();
         int256 pnl = _pnl(p, price) - int256(_fee(p.notional));
         int256 cap = int256(p.margin * MAX_PROFIT_X);
@@ -241,14 +248,12 @@ contract HedgedPerp {
 
     /// Order the gap between what traders hold, net, and the pool's Core position. One IOC, at
     /// most maxHedgeLots, limit HEDGE_SLIP_BPS beyond the touch and within HEDGE_MAX_ORACLE_BPS
-    /// of the oracle. Whether it filled is read on the next call; HEDGE_QUIET keeps a second
-    /// order from going out before the first has run. Settles are not blocked meanwhile (that
-    /// would let the keeper hold closes up), so an order can run after traders' exposure moved:
-    /// the Core gap is then the usual lag plus up to that order the wrong way (review r2).
+    /// of the oracle. Never while the previous order is unconfirmed (orderInFlight), so at most
+    /// one order is ever outstanding unless Core holds an action for over ORDER_TIMEOUT.
     function hedge() external onlyKeeper returns (int256 sent) {
-        if (block.timestamp < hedgeQuietUntil) revert HedgeQuiet(hedgeQuietUntil);
         // Core drops actions from an account that does not exist yet (review r1)
         if (!Core.userExists(address(this))) revert NoCoreAccount();
+        if (orderInFlight()) revert OrderInFlight();
         int256 target = targetLots();
         int256 cur = coreLots();
         int256 gap = target - cur;
@@ -262,7 +267,8 @@ contract HedgedPerp {
         if (usd < MIN_HEDGE_USD) revert HedgeTooSmall(usd);
         uint64 sz8 = uint64(lots * 10 ** (8 - szDecimals));
         Core.limitOrder(perpIndex, isBuy, px8, sz8, false, Core.TIF_IOC, 0);
-        hedgeQuietUntil = uint64(block.timestamp) + HEDGE_QUIET;
+        orderSentAt = uint64(block.timestamp);
+        orderFrom = cur;
         sent = isBuy ? int256(lots) : -int256(lots);
         emit Hedged(isBuy, lots, px8, target, cur);
     }
@@ -317,6 +323,11 @@ contract HedgedPerp {
         return long ? (o > m ? o : m) : (o < m ? o : m);
     }
 
+    /// The last order is neither seen on Core (the position still equals orderFrom) nor timed out.
+    function orderInFlight() public view returns (bool) {
+        return orderSentAt != 0 && block.timestamp < orderSentAt + ORDER_TIMEOUT && coreLots() == orderFrom;
+    }
+
     /// Traders' net position in Core lots (szDecimals units), rounded to the nearest lot. The
     /// pool takes the other side of traders, so it hedges by holding the same position.
     function targetLots() public view returns (int256) {
@@ -369,6 +380,13 @@ contract HedgedPerp {
         if (amount == 0) return;
         credit[to] += amount;
         owed += amount;
+    }
+
+    /// While a hedge order is unconfirmed, settles wait, so it does not run against exposure
+    /// that has already moved. Per request and capped: the window's last SETTLE_LAST seconds
+    /// are always open, so hedging cannot hold a close back (review r3).
+    function _waitForOrder(uint64 requestedAt) internal view {
+        if (block.timestamp < requestedAt + SETTLE_WINDOW - SETTLE_LAST && orderInFlight()) revert OrderInFlight();
     }
 
     function _checkWindow(uint64 requestedAt) internal view {

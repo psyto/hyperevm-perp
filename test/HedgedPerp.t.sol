@@ -396,15 +396,73 @@ contract HedgedPerpTest is Test {
         assertEq(sz, 0.025e8);
     }
 
-    function test_hedgeQuietThenNothingToDo() public {
+    /// At most one unconfirmed order: repeated calls send nothing until Core shows a change
+    /// (review r3: three calls 10 s apart used to send three orders).
+    function test_oneUnconfirmedOrder() public {
         _open(alice, true, 1_000e6, 10);
         perp.hedge();
-        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.HedgeQuiet.selector, uint64(block.timestamp + 10)));
-        perp.hedge();
-        vm.warp(block.timestamp + 10);
+        for (uint256 i; i < 3; i++) {
+            vm.warp(block.timestamp + 15);
+            vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+            perp.hedge();
+        }
+        assertEq(WriterRecorder(WRITER).count(), 1);
         _setCore(true, 12_500, 500e6, 0); // filled
+        assertFalse(perp.orderInFlight());
         vm.expectRevert(HedgedPerp.NothingToHedge.selector);
         perp.hedge();
+    }
+
+    function test_partialFillConfirmsAndTheRestIsOrdered() public {
+        _open(alice, true, 1_000e6, 10);
+        perp.hedge();
+        _setCore(true, 5_000, 500e6, 0); // part filled: confirmed
+        perp.hedge();
+        (,,, uint64 sz,,) = _lastOrder();
+        assertEq(sz, 0.075e8);
+    }
+
+    function test_unfilledOrderGivenUpAfterTimeout() public {
+        _open(alice, true, 1_000e6, 10);
+        perp.hedge();
+        vm.warp(block.timestamp + 59);
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.hedge();
+        vm.warp(block.timestamp + 1);
+        perp.hedge();
+        assertEq(WriterRecorder(WRITER).count(), 2);
+    }
+
+    /// Settles wait for an unconfirmed order, but never past the window's last 2 s.
+    function test_settleWaitsForOrderButNotForever() public {
+        _open(alice, true, 1_000e6, 10);
+        vm.prank(bob);
+        uint256 id = perp.requestOpen(false, 100e6, 10);
+        perp.hedge();
+        vm.warp(block.timestamp + 2);
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.settleOpen(id);
+        vm.warp(block.timestamp + 11); // requestedAt + 13: the last 2 s
+        perp.settleOpen(id);
+    }
+
+    function test_settleProceedsOnceOrderSeen() public {
+        _open(alice, true, 1_000e6, 10);
+        vm.prank(bob);
+        uint256 id = perp.requestOpen(false, 100e6, 10);
+        perp.hedge();
+        vm.warp(block.timestamp + 2);
+        _setCore(true, 12_500, 500e6, 0);
+        perp.settleOpen(id);
+    }
+
+    function test_liquidationDoesNotWaitForOrder() public {
+        uint256 id = _open(alice, true, 100e6, 20);
+        _open(bob, true, 1_000e6, 10);
+        perp.hedge();
+        assertTrue(perp.orderInFlight());
+        _setPrice(762_000);
+        perp.liquidate(id);
     }
 
     function test_hedgeUnwindsAfterClose() public {

@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {Core} from "hyperevm-amm/Core.sol";
+import {HedgedPerp, IToken} from "../../src/HedgedPerp.sol";
+
+contract R3Usdc {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract R3Writer {
+    uint256 public count;
+    function sendRawAction(bytes calldata) external { count++; }
+}
+
+/// @dev This is deliberately a failing regression test. It asserts the documented
+/// "ordinary lag plus one stale order" bound after three CoreWriter orders were delayed.
+contract R3AccumulatedLateIocsPoC is Test {
+    address constant POSITION = 0x0000000000000000000000000000000000000800;
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
+    address constant WRITER = 0x3333333333333333333333333333333333333333;
+    uint32 constant BTC = 3;
+
+    HedgedPerp perp;
+    R3Usdc usdc;
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+
+    function setUp() public {
+        vm.warp(1_800_000_000);
+        usdc = new R3Usdc();
+        perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100);
+        vm.etch(WRITER, address(new R3Writer()).code);
+        _setPrice(800_000); // $80,000.0
+        _setCore(0);
+
+        usdc.mint(address(this), 1_000_000e6);
+        usdc.approve(address(perp), type(uint256).max);
+        perp.fund(20_000e6);
+        for (uint256 i; i < 2; i++) {
+            address trader = i == 0 ? alice : bob;
+            usdc.mint(trader, 1_000_000e6);
+            vm.prank(trader);
+            usdc.approve(address(perp), type(uint256).max);
+        }
+    }
+
+    function _setPrice(uint64 px) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(BBO, abi.encode(BTC), abi.encode(px - px / 20_000, px + px / 20_000));
+    }
+
+    function _setCore(int64 lots) internal {
+        vm.mockCall(USER_EXISTS, abi.encode(address(perp)), abi.encode(true));
+        vm.mockCall(
+            POSITION, abi.encode(address(perp), uint16(BTC)), abi.encode(Core.Position(lots, 0, 0, 20, false))
+        );
+    }
+
+    function _open(address trader, bool long) internal returns (uint256 id) {
+        vm.prank(trader);
+        id = perp.requestOpen(long, 1_000e6, 10); // 0.125 BTC = 12,500 lots
+        vm.warp(block.timestamp + 2);
+        perp.settleOpen(id);
+    }
+
+    function _close(address trader, uint256 id) internal {
+        vm.prank(trader);
+        perp.requestClose(id);
+        vm.warp(block.timestamp + 2);
+        perp.settleClose(id);
+    }
+
+    function _abs(int256 x) internal pure returns (uint256) {
+        return uint256(x < 0 ? -x : x);
+    }
+
+    function test_poc_moreThanOneLateOrderCanAccumulate() public {
+        uint256 longId = _open(alice, true);
+
+        // Core does not report either IOC as run, so each quiet-period expiry
+        // queues the same buy again. This can repeat for any number of periods.
+        perp.hedge();
+        vm.warp(block.timestamp + 10);
+        perp.hedge();
+        vm.warp(block.timestamp + 10);
+        perp.hedge();
+        assertEq(R3Writer(WRITER).count(), 3, "three IOCs are outstanding");
+
+        // While all three are outstanding, the trader book reverses.
+        _close(alice, longId);
+        _open(bob, false);
+        assertEq(perp.targetLots(), -12_500);
+
+        // All three delayed buys finally execute. With no delayed order, the
+        // current ordinary gap was 12,500 lots; the docs allow one additional
+        // 12,500-lot wrong-way order, i.e. 25,000 lots total.
+        _setCore(37_500);
+        uint256 gap = _abs(perp.coreLots() - perp.targetLots());
+        assertLe(gap, 25_000, "documented lag plus one-order bound");
+    }
+}
