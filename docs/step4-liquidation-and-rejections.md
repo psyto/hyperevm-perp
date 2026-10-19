@@ -25,16 +25,36 @@ At 20x the line is −2.5% (equity below 2.5% of notional = half the margin). A 
 show "healthy" at −3.37% was itself liquidatable (a call returned 0.652431): the threshold was
 misremembered as 3.75%, not a contract issue.
 
+## An IOC that finds nothing
+Later the same day, with USDC made on Core by selling 0.30 HYPE on spot `@1035` (IOC at 35.0,
+filled at 36.491: 10.94 USDC):
+
+| # | Step | Result |
+|---|---|---|
+| 1 | 6 USDC on Core to the pool, `coreUsdClass(6e6, true)` | pool perp account 6.0 |
+| 2 | `rawIoc(buy, 70,000.0, 0.00015)`, about 15% under the book (cloid `0x8000…0001`) | 0.45 s after the block `unknownOid`; 1.08 s **`iocCancelRejected`**; `coreLots` 0 |
+| 3 | `acknowledge(cloid)`, `coreUsdClass(6e6, false)`, `coreToEvm(6e8)`, `defund(6)` | pool empty except 0.0076 HYPE on Core |
+
+## All four outcomes seen
+| Order | First read | Final status | Seen after |
+|---|---|---|---|
+| step 3 hedge buy | 0.43 s `unknownOid` | `filled` | 1.05 s |
+| step 3 hedge sell | | `filled` | ≤ 3 s |
+| hedge from an empty perp account | | `perpMarginRejected` | ≤ 2.08 s |
+| raw IOC under the book | 0.45 s `unknownOid` | `iocCancelRejected` | 1.08 s |
+
+Every CoreWriter order showed up in `orderStatus` by its cloid, with a final status, within about
+2 s; each was `unknownOid` until then. None stayed unknown, so the "never acknowledge on
+unknownOid" rule cost nothing here.
+
 ## Money
 Everything came back: EVM USDC on the key 19.879934 before and after (trader, liquidator and
 liquidity provider were the same key). HYPE: 0.035 into the pool's Core account, of which 0.0274
 was account activation; 0.0076 is left there (no function sends Core HYPE back).
 
-## Not done
-- **`iocCancelRejected`** (an IOC that finds nothing): it needs USDC on the pool's perp account,
-  and none could be put there today. Core's minimum order is $10, so the key's 0.24 HYPE
-  (~$8.8) could not be sold for USDC either.
+## Notes
 - **USDC EVM → Core stopped working for an EOA.** `CoreDepositWallet.deposit(5e6, spot)` from the
   key emitted `Transfer(key → 0x2000…0000, 5e6)` and nothing reached Core (still 0.1 after several
   minutes; no ledger entry). On 2026-10-17 the same call from an EOA arrived within 1 s
-  (hyperevm-amm docs/step1-bridging.md); only a contract's deposit failed then.
+  (hyperevm-amm docs/step1-bridging.md); only a contract's deposit failed then. USDC for the last test was made on Core instead,
+  from HYPE bridged over (HYPE's bridge works) and sold on spot.
