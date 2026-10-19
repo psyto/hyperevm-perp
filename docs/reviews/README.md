@@ -1,0 +1,15 @@
+# Reviews
+
+Each round: the prompt sent to Codex (`payload-review-rN.md`), its full output
+(`review-rN.out.md`), its proof-of-concept tests (`rN-poc.t.sol.txt`, kept as text so they do
+not run with the suite; each says which commit it ran against), and what was fixed (`rN.md`).
+Test counts quoted in Codex's outputs include its own PoCs.
+
+| Round | Notes |
+|---|---|
+| [r1](r1.md) | whole market |
+| [r2](r2.md) | round-1 fixes |
+| [r3](r3.md) | round-2 fixes; the hedge's in-flight order rebuilt |
+| [r4](r4.md) | the rebuild; keeper acknowledgement by cloid |
+| [r5](r5.md) | acknowledgement procedure (with web search) |
+| [r6](r6.md) | the testnet-only copy; r6b APPROVE |
