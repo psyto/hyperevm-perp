@@ -1,0 +1,7 @@
+The non-final acknowledgement and two-Core-order paths are closed: unknown/unlisted statuses fail closed, and the on-chain `pendingCloid` gate serializes sends.
+
+VERDICT: CHANGES
+
+1. **High — a normal interruption between successful fill legs leaves an acknowledged, open position.** After a successful buy fill, the script writes the row and acknowledges it before starting the matching sell ([orders.py:200](recorder/orders.py:200)). Any later failure—restart, RPC/API outage, preflight failure, or sell rejection—leaves the long open with `pendingCloid == 0`; a new `fill` run then refuses because it expects a flat start ([orders.py:163](recorder/orders.py:163)). “Even `n`” guarantees flatness only on uninterrupted success. A durable paired-leg recovery/unwind path is still needed.
+
+2. **Medium — rec1’s recovery/reconciliation path remains incomplete after a broadcast.** The transaction hash is logged, but receipt polling can still abort on an RPC failure after its four retries rather than continue to its deadline ([orders.py:53](recorder/orders.py:53), [orders.py:130](recorder/orders.py:130)). On restart, `run` reads `pendingCloid` and exits immediately ([orders.py:153](recorder/orders.py:153)); it provides no reconciliation that obtains that cloid’s status, position, and open orders or records the outcome. This remains fail-closed against another recorder order, but leaves an executed fill—especially the first fill leg—stranded for manual recovery.
