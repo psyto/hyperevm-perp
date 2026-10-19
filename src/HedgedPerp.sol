@@ -318,13 +318,13 @@ contract HedgedPerp {
     // ---------------------------------------------------------------- views
 
     /// The oracle, checked against the mark, the mid and the spread. 1e18 USD per unit.
-    function guardedPrice() public view returns (uint256) {
+    function guardedPrice() public view virtual returns (uint256) {
         return HLPriceGuard.read(_asset(), _bounds(), _noRef());
     }
 
     /// The better of the oracle and the mark for the trader: the higher for a long, the lower
     /// for a short. One feed moving alone liquidates no one; a real move moves both.
-    function liquidationPrice(bool long) public view returns (uint256) {
+    function liquidationPrice(bool long) public view virtual returns (uint256) {
         uint256 o = HLPrecompiles.oracle(perpIndex, szDecimals);
         uint256 m = HLPrecompiles.mark(perpIndex, szDecimals);
         if (o == 0 || m == 0) revert NoPrice();
