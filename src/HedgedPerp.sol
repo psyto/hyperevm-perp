@@ -271,8 +271,9 @@ contract HedgedPerp {
         emit Hedged(cloid, isBuy, lots, px8, target, cur);
     }
 
-    /// The keeper has seen order `cloid` reach a final status on Core (filled, cancelled or
-    /// rejected), or seen that Core never registered it. Only then may hedge() send another.
+    /// The keeper has read a final status for order `cloid` from the info API (filled,
+    /// iocCancelRejected, perpMarginRejected, ...). Never on unknownOid, which an order still in
+    /// CoreWriter's delay also returns (review r5). Only then may hedge() send another.
     /// Acknowledging early can put two orders on Core; that risks only Core money.
     function acknowledge(uint128 cloid) external onlyKeeper {
         if (cloid == 0 || cloid != pendingCloid) revert BadRequest();

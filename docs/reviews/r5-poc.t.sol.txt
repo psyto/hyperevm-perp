@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {Core} from "hyperevm-amm/Core.sol";
+import {HedgedPerp, IToken} from "../../src/HedgedPerp.sol";
+
+contract R5Usdc {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// @dev Models CoreWriter accepting and delaying actions. It deliberately never changes szi.
+contract R5QueuedWriter {
+    uint256 public count;
+
+    function sendRawAction(bytes calldata) external { count++; }
+}
+
+/// @dev Deliberately failing. `unknownOid` is not an on-chain acknowledgement: if an operator
+/// treats an early API miss as "never registered", the first CoreWriter action can still be
+/// queued when acknowledgement releases the second action.
+contract R5UnknownCloidPoC is Test {
+    address constant POSITION = 0x0000000000000000000000000000000000000800;
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
+    address constant WRITER = 0x3333333333333333333333333333333333333333;
+    uint32 constant BTC = 3;
+
+    HedgedPerp perp;
+    R5Usdc usdc;
+    address alice = address(0xA11CE);
+
+    function setUp() public {
+        usdc = new R5Usdc();
+        perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100);
+        vm.etch(WRITER, address(new R5QueuedWriter()).code);
+        vm.mockCall(USER_EXISTS, abi.encode(address(perp)), abi.encode(true));
+        vm.mockCall(POSITION, abi.encode(address(perp), uint16(BTC)), abi.encode(Core.Position(0, 0, 0, 20, false)));
+        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(uint64(800_000)));
+        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(uint64(800_000)));
+        vm.mockCall(BBO, abi.encode(BTC), abi.encode(uint64(799_960), uint64(800_040)));
+
+        usdc.mint(address(this), 20_000e6);
+        usdc.approve(address(perp), type(uint256).max);
+        perp.fund(20_000e6);
+        usdc.mint(alice, 2_000e6);
+        vm.prank(alice);
+        usdc.approve(address(perp), type(uint256).max);
+    }
+
+    function test_poc_unknownCloidCannotProveCoreWriterActionWillNotExecute() public {
+        vm.prank(alice);
+        uint256 id = perp.requestOpen(true, 1_000e6, 10);
+        vm.warp(block.timestamp + perp.SETTLE_DELAY());
+        perp.settleOpen(id);
+
+        perp.hedge(); // CoreWriter has accepted cloid 1 but Core has not processed it yet.
+        perp.acknowledge(1); // Keeper incorrectly treats a transient unknownOid as terminal.
+        perp.hedge(); // Sends cloid 2 while cloid 1 can still execute.
+
+        assertEq(R5QueuedWriter(WRITER).count(), 1, "early unknownOid releases a second queued IOC");
+    }
+}

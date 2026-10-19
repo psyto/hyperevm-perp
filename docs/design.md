@@ -52,21 +52,38 @@ order that never fills is ordered again next time; one that fills partly leaves 
   it too, an order can net back to where it started, and a timeout does not cancel an action
   already queued). So `hedge()` gives each IOC a fresh cloid and refuses while `pendingCloid` is
   set; the keeper clears it with `acknowledge(cloid)` after reading the order's status by cloid
-  from the Hyperliquid API (filled, cancelled or rejected, or never registered by Core). There
-  is no automatic retry. The keeper is the only liquidity provider, so acknowledging early risks
+  from the Hyperliquid API. There is no automatic retry. See "Acknowledging an order" below. The keeper is the only liquidity provider, so acknowledging early risks
   only its own Core money.
 - **Settles never wait for the hedge.** Making them wait (r3) let the keeper delay any settle by
   sending a hedge (r4). So the one outstanding order can run after traders' exposure moved and
   then point the wrong way, by at most its size (`maxHedgeLots`).
 - **What is left.** Between two hedges the Core position trails traders' exposure by whatever
-  settled (no size bound; time-bounded by how fast the keeper acknowledges and hedges again).
-  On top of that, at most one order the wrong way. Core liquidations or ADL of the hedge move
+  settled. Nothing in the protocol bounds that in size or in time: it lasts until the keeper sees
+  a final status and hedges again. On top of that, at most one order the wrong way, as long as
+  the keeper follows the rule below. Core liquidations or ADL of the hedge move
   the Core position by themselves; the next hedge orders the gap from what Core shows. All of
   this falls on Core money only, never on what traders are owed.
 - **No Core account, no hedge.** Core drops actions from an account that does not exist yet, so
   `hedge()` reverts until `userExists` (review r1).
 - **One liquidity provider** in this version: the keeper funds and defunds; `defund` only takes
   the pool's own EVM USDC and keeps `maxProfits` covered.
+
+## Acknowledging an order
+Query `{"type":"orderStatus","user":<pool>,"oid":"0x<cloid as 32 hex digits>"}` on the info
+endpoint. Acknowledge only on a final `order.status`:
+
+| Status | Meaning |
+|---|---|
+| `filled` | the IOC filled (possibly at several prices) |
+| `iocCancelRejected` | the IOC found nothing to fill against |
+| `perpMarginRejected` | the pool's perp account lacked margin |
+| other `...Rejected`, `canceled` | final |
+
+Never acknowledge on `{"status":"unknownOid"}`: it is what an order still inside CoreWriter's
+delay returns too, so it cannot mean "never registered" (review r5). An order that stays unknown
+keeps `pendingCloid` set and the hedge stopped; that is the safe failure. How long a CoreWriter
+order takes to show up in `orderStatus`, and whether one Core drops before the book ever shows
+up at all, is not documented; step 3 measures it on testnet.
 
 ## Units
 | Value | Unit |
