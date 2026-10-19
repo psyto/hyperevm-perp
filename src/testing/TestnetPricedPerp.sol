@@ -7,7 +7,7 @@ import {HLPrecompiles} from "hl-price-guard/HLPrecompiles.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 
 /// @notice TESTNET ONLY. HedgedPerp with the price set by the keeper instead of read from
-/// HyperCore, so liquidation can be exercised on testnet, where BTC does not move 3.75% on
+/// HyperCore, so liquidation can be exercised on testnet, where BTC does not move 2.5% on
 /// request. Settles still need the set price within 1% of the real oracle, because position
 /// sizes (and so the real hedge) come from it (review r6); liquidation takes the set price as is.
 /// The hedge trades the real Core book at real prices. Also sends one raw IOC on request, to

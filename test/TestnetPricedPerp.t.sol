@@ -38,7 +38,7 @@ contract TestnetPricedPerpTest is Test {
 
         vm.expectRevert(HedgedPerp.Healthy.selector);
         perp.liquidate(id);
-        perp.setPrice(77_000e18); // -3.75%: equity 0.5 < 1
+        perp.setPrice(77_000e18); // -3.75%: equity 0.5 < 1 (liquidatable from -2.5% at 20x)
         perp.liquidate(id);
         assertEq(perp.openCount(), 0);
     }
