@@ -399,9 +399,9 @@ contract HedgedPerpTest is Test {
     function test_hedgeQuietThenNothingToDo() public {
         _open(alice, true, 1_000e6, 10);
         perp.hedge();
-        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.HedgeQuiet.selector, uint64(block.timestamp + 30)));
+        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.HedgeQuiet.selector, uint64(block.timestamp + 10)));
         perp.hedge();
-        vm.warp(block.timestamp + 30);
+        vm.warp(block.timestamp + 10);
         _setCore(true, 12_500, 500e6, 0); // filled
         vm.expectRevert(HedgedPerp.NothingToHedge.selector);
         perp.hedge();

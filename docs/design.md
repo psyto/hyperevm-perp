@@ -46,15 +46,21 @@ order that never fills is ordered again next time; one that fills partly leaves 
   the keeper brings it to the EVM.
 - **Payouts are credits.** A close or liquidation credits USDC; `claim()` pays it from the EVM
   balance. When the hedge's profit is on Core, the keeper brings it over (`coreToEvm`) first.
-- **A late order is the liquidity provider's risk, bounded.** An order sent by `hedge()` can run
-  after a settle has changed traders' exposure, leaving the Core position off by at most that
-  order (`maxHedgeLots`) until the next `hedge()` after the quiet period. That loss falls on Core
-  money only.
+- **The hedge lags, and a late order can add to the lag.** Between two `hedge()` calls the Core
+  position trails traders' exposure by whatever settled meanwhile; that gap has no size bound,
+  only a time bound (the next `hedge()`). On top of it, an order already sent can run after the
+  exposure moved and then point the wrong way, by at most that order (`maxHedgeLots`). Review r2
+  showed the earlier wording here ("off by at most that order") was wrong: Core +1 BTC, +1 BTC
+  in flight, traders reversing from +2 to −2 BTC leaves Core +2 against −2. Settles are not
+  frozen while an order is in flight, because then the keeper could hold any close back by
+  hedging. All of this falls on Core money only, never on what traders are owed.
 - **No Core account, no hedge.** Core drops actions from an account that does not exist yet, so
   `hedge()` reverts until `userExists` (review r1).
-- **One IOC per 30 s.** The EVM cannot tell when an order has run; a second order before the
+- **One IOC per 10 s.** The EVM cannot tell when an order has run; a second order before the
   first runs would double it. Spot IOCs ran 347–477 ms after their block in hyperevm-amm's
-  measurements; a BTC perp IOC showed up in the position within 4 s.
+  measurements; a BTC perp IOC showed up in the position within 4 s. 10 s is a time assumption,
+  not a documented bound: an order that ran later would be doubled by the next one, by at most
+  `maxHedgeLots`, and corrected by the one after.
 - **One liquidity provider** in this version: the keeper funds and defunds; `defund` only takes
   the pool's own EVM USDC and keeps `maxProfits` covered.
 

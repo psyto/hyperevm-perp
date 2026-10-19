@@ -40,7 +40,7 @@ contract HedgedPerp {
     uint64 public constant SETTLE_WINDOW = 15; // seconds; after this the trader can cancel
     uint256 public constant HEDGE_SLIP_BPS = 30; // IOC limit beyond the best bid/ask
     uint256 public constant HEDGE_MAX_ORACLE_BPS = 100; // and never further than this from the oracle
-    uint64 public constant HEDGE_QUIET = 30; // seconds between hedge orders (the EVM is not told when one runs)
+    uint64 public constant HEDGE_QUIET = 10; // seconds between hedge orders (the EVM is not told when one runs)
     uint256 public constant MIN_HEDGE_USD = 12e6; // HyperCore rejects orders under $10
 
     IToken public immutable usdc; // 6 decimals
@@ -242,7 +242,9 @@ contract HedgedPerp {
     /// Order the gap between what traders hold, net, and the pool's Core position. One IOC, at
     /// most maxHedgeLots, limit HEDGE_SLIP_BPS beyond the touch and within HEDGE_MAX_ORACLE_BPS
     /// of the oracle. Whether it filled is read on the next call; HEDGE_QUIET keeps a second
-    /// order from going out before the first has run.
+    /// order from going out before the first has run. Settles are not blocked meanwhile (that
+    /// would let the keeper hold closes up), so an order can run after traders' exposure moved:
+    /// the Core gap is then the usual lag plus up to that order the wrong way (review r2).
     function hedge() external onlyKeeper returns (int256 sent) {
         if (block.timestamp < hedgeQuietUntil) revert HedgeQuiet(hedgeQuietUntil);
         // Core drops actions from an account that does not exist yet (review r1)

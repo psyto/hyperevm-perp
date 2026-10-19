@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {Core} from "hyperevm-amm/Core.sol";
+import {HedgedPerp, IToken} from "../../src/HedgedPerp.sol";
+
+contract PoCUsdc {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract PoCWriter {
+    function sendRawAction(bytes calldata) external {}
+}
+
+contract HedgedPerpRound2PoC is Test {
+    address constant POSITION = 0x0000000000000000000000000000000000000800;
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
+    address constant WRITER = 0x3333333333333333333333333333333333333333;
+    uint32 constant BTC = 3;
+
+    HedgedPerp perp;
+    PoCUsdc usdc;
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+
+    function setUp() public {
+        vm.warp(1_800_000_000);
+        usdc = new PoCUsdc();
+        perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100);
+        vm.etch(WRITER, address(new PoCWriter()).code);
+        _setPrice(800_000); // $80,000.0
+        _setCore(0);
+
+        usdc.mint(address(this), 1_000_000e6);
+        usdc.approve(address(perp), type(uint256).max);
+        perp.fund(10_000e6);
+        usdc.mint(alice, 1_000_000e6);
+        usdc.mint(bob, 1_000_000e6);
+        vm.prank(alice);
+        usdc.approve(address(perp), type(uint256).max);
+        vm.prank(bob);
+        usdc.approve(address(perp), type(uint256).max);
+    }
+
+    function _setPrice(uint64 px) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(BBO, abi.encode(BTC), abi.encode(px - px / 20_000, px + px / 20_000));
+    }
+
+    function _setCore(int64 lots) internal {
+        vm.mockCall(USER_EXISTS, abi.encode(address(perp)), abi.encode(true));
+        vm.mockCall(
+            POSITION, abi.encode(address(perp), uint16(BTC)), abi.encode(Core.Position(lots, 0, 0, 20, false))
+        );
+    }
+
+    function _open(address trader, bool long, uint256 margin) internal returns (uint256 id) {
+        vm.prank(trader);
+        id = perp.requestOpen(long, margin, 20);
+        vm.warp(block.timestamp + 2);
+        perp.settleOpen(id);
+    }
+
+    function _close(address trader, uint256 id) internal {
+        vm.prank(trader);
+        perp.requestClose(id);
+        vm.warp(block.timestamp + 2);
+        perp.settleClose(id);
+    }
+
+    /// An in-flight IOC is not the only exposure that can become stale. The
+    /// existing Core position can have been a correct hedge when the order was
+    /// sent, then all trader exposure can reverse before that order executes.
+    /// The resulting Core/trader gap is four times maxHedgeLots here, not at
+    /// most the one pending order as docs/design.md promises.
+    function test_PoC_inFlightOrderDoesNotBoundCoreMismatchAfterExposureReversal() public {
+        // Independent EVM capital covers either position's $40k profit cap.
+        perp.fund(100_000e6);
+
+        uint256 longId = _open(alice, true, 8_000e6); // target: +2 BTC = +200,000 lots
+        _setCore(100_000); // an existing +1 BTC hedge
+        perp.hedge(); // queues another +1 BTC; maxHedgeLots is 100,000
+        uint64 quietUntil = perp.hedgeQuietUntil();
+
+        // Before the asynchronous IOC reaches Core, the trader book reverses.
+        _close(alice, longId);
+        _open(bob, false, 8_000e6);
+        assertEq(perp.targetLots(), -200_000);
+
+        // Model the queued IOC filling: Core becomes +2 BTC, opposite traders.
+        _setCore(200_000);
+        int256 gap = perp.coreLots() - perp.targetLots();
+        assertEq(gap, 400_000);
+        assertEq(uint256(gap), 4 * perp.maxHedgeLots(), "gap exceeds one stale order");
+
+        vm.expectRevert(abi.encodeWithSelector(HedgedPerp.HedgeQuiet.selector, quietUntil));
+        perp.hedge();
+    }
+}
