@@ -8,11 +8,13 @@ import {MockUSDC, WriterRecorder} from "./HedgedPerp.t.sol";
 
 contract TestnetPricedPerpTest is Test {
     address constant WRITER = 0x3333333333333333333333333333333333333333;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
     MockUSDC usdc;
 
     function setUp() public {
         usdc = new MockUSDC();
         vm.etch(WRITER, address(new WriterRecorder()).code);
+        vm.mockCall(ORACLE_PX, abi.encode(uint32(3)), abi.encode(uint64(800_000))); // 80,000.0
     }
 
     function test_refusesAnyChainButTestnet() public {
@@ -41,6 +43,19 @@ contract TestnetPricedPerpTest is Test {
         assertEq(perp.openCount(), 0);
     }
 
+    /// Position sizes, and so the real hedge, come from the settle price: it must stay near the
+    /// real oracle (review r6: a $1 price made a 40 BTC hedge). Liquidation takes any price.
+    function test_settlePriceStaysNearTheOracle() public {
+        vm.chainId(998);
+        TestnetPricedPerp perp = new TestnetPricedPerp(IToken(address(usdc)), 3, 5, 100, 1e18);
+        vm.expectRevert(abi.encodeWithSelector(TestnetPricedPerp.SettlePriceOff.selector, 1e18, 80_000e18));
+        perp.guardedPrice();
+        perp.setPrice(80_800e18); // +1%
+        assertEq(perp.guardedPrice(), 80_800e18);
+        perp.setPrice(1e18);
+        assertEq(perp.liquidationPrice(true), 1e18);
+    }
+
     function test_zeroPriceRevertsBothReads() public {
         vm.chainId(998);
         TestnetPricedPerp perp = new TestnetPricedPerp(IToken(address(usdc)), 3, 5, 100, 0);
@@ -66,7 +81,11 @@ contract TestnetPricedPerpTest is Test {
         TestnetPricedPerp perp = new TestnetPricedPerp(IToken(address(usdc)), 3, 5, 100, 1);
         uint128 c = perp.rawIoc(true, 70_000e8, 1000);
         assertEq(c, (uint128(1) << 127) | 1);
-        assertEq(perp.pendingCloid(), 0, "outside the hedge bookkeeping");
-        assertEq(WriterRecorder(WRITER).count(), 1);
+        assertEq(perp.pendingCloid(), c, "takes the one outstanding slot (review r6)");
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.rawIoc(true, 70_000e8, 1000);
+        perp.acknowledge(c);
+        perp.rawIoc(true, 70_000e8, 1000);
+        assertEq(WriterRecorder(WRITER).count(), 2);
     }
 }

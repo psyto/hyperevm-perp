@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {Core} from "hyperevm-amm/Core.sol";
+import {IToken} from "../../src/HedgedPerp.sol";
+import {TestnetPricedPerp} from "../../src/testing/TestnetPricedPerp.sol";
+import {MockUSDC, WriterRecorder} from "../HedgedPerp.t.sol";
+
+/// @dev Deliberately failing Round 6 PoCs. Run individually with:
+///      forge test --match-path test/poc/r6-poc.t.sol
+contract R6TestnetPricedPerpPoC is Test {
+    address constant POSITION = 0x0000000000000000000000000000000000000800;
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
+    address constant WRITER = 0x3333333333333333333333333333333333333333;
+    uint32 constant BTC = 3;
+
+    MockUSDC usdc;
+    TestnetPricedPerp perp;
+    address alice = address(0xA11CE);
+
+    function setUp() public {
+        vm.chainId(998);
+        vm.warp(1_800_000_000);
+        usdc = new MockUSDC();
+        perp = new TestnetPricedPerp(IToken(address(usdc)), BTC, 5, 10_000_000, 80_000e18);
+        vm.etch(WRITER, address(new WriterRecorder()).code);
+        vm.mockCall(USER_EXISTS, abi.encode(address(perp)), abi.encode(true));
+        vm.mockCall(POSITION, abi.encode(address(perp), uint16(BTC)), abi.encode(Core.Position(0, 0, 0, 20, false)));
+        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(uint64(800_000)));
+        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(uint64(800_000)));
+        vm.mockCall(BBO, abi.encode(BTC), abi.encode(uint64(799_960), uint64(800_040)));
+
+        usdc.mint(address(this), 100e6);
+        usdc.approve(address(perp), type(uint256).max);
+        perp.fund(20e6); // Covers the 5x profit cap of the 2-USDC position below.
+        usdc.mint(alice, 10e6);
+        vm.prank(alice);
+        usdc.approve(address(perp), type(uint256).max);
+    }
+
+    function _openTwoDollarsAt20x() internal {
+        vm.prank(alice);
+        uint256 id = perp.requestOpen(true, 2e6, 20);
+        vm.warp(block.timestamp + 2);
+        perp.settleOpen(id);
+    }
+
+    /// rawIoc has a separate cloid, but is still an asynchronous CoreWriter action from the same
+    /// Core account. It can be queued while hedge() believes it has its only pending action.
+    function test_poc_rawIocBypassesTheOneOutstandingOrderGate() public {
+        _openTwoDollarsAt20x();
+        perp.hedge();
+        assertEq(perp.pendingCloid(), 1, "hedge order is pending");
+
+        perp.rawIoc(true, 70_000e8, 0.001e8); // A second CoreWriter action, before cloid 1 is final.
+
+        assertEq(WriterRecorder(WRITER).count(), 1, "rawIoc must not queue alongside a pending hedge");
+    }
+
+    /// The EVM capital check is only 10 USDC, but a keeper typo or deliberately artificial entry
+    /// price turns that 40-USDC virtual notional into a 40-BTC order at the real book.
+    function test_poc_simulatedEntryPriceCanMakeTheRealHedgeMillions() public {
+        perp.setPrice(1e18); // $1 simulated entry price; real oracle/book remains $80,000.
+        _openTwoDollarsAt20x();
+        assertEq(perp.targetLots(), 4_000_000, "virtual $40 notional is 40 BTC at the simulated price");
+
+        perp.hedge();
+
+        bytes memory raw = WriterRecorder(WRITER).last();
+        bytes memory args = new bytes(raw.length - 4);
+        for (uint256 i; i < args.length; ++i) args[i] = raw[i + 4];
+        (,, uint64 px8, uint64 sz8,,,) = abi.decode(args, (uint32, bool, uint64, uint64, bool, uint8, uint128));
+
+        assertLt(uint256(px8) * uint256(sz8) / 1e10, 100e6, "a few-USDC test must not submit a multi-million-dollar real IOC");
+    }
+}
