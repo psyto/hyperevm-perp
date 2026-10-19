@@ -6,7 +6,9 @@ build after [hyperevm-amm](https://github.com/psyto/hyperevm-amm) (an exchange t
 HyperCore) and [hyperevm-lend](https://github.com/psyto/hyperevm-lend) (a lending market that
 reads HyperCore prices).
 
-Status (2026-10-19): a learning project, not audited, not for real funds.
+Status (2026-10-19): a learning project, not audited, not for real funds. It has only been
+run on testnet; `HedgedPerp` itself is not restricted to any chain (only the testnet copy is),
+so do not deploy it with real money.
 - Codex reviewed it adversarially six times (r6 on the testnet-only copy, r6b APPROVE). The
   hedge's "is my order done?" took four rounds and ended as a keeper acknowledgement, below.
 - One hedged round trip ran on testnet with real prices: open, hedge on Core, close, unwind the
