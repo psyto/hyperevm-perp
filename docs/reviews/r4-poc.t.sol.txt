@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+import {Test} from "forge-std/Test.sol";
+import {Core} from "hyperevm-amm/Core.sol";
+import {HedgedPerp, IToken} from "../../src/HedgedPerp.sol";
+
+contract R4Usdc {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract R4Writer {
+    uint256 public count;
+
+    function sendRawAction(bytes calldata) external {
+        count++;
+    }
+}
+
+/// @dev Deliberately failing regression tests.  CoreWriter has no acknowledgement: a change to
+/// szi can be a Core liquidation/ADL rather than this contract's pending IOC, and expiry does
+/// not cancel a queued CoreWriter action.
+contract R4OrderConfirmationPoC is Test {
+    address constant POSITION = 0x0000000000000000000000000000000000000800;
+    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
+    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
+    address constant BBO = 0x000000000000000000000000000000000000080e;
+    address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
+    address constant WRITER = 0x3333333333333333333333333333333333333333;
+    uint32 constant BTC = 3;
+
+    HedgedPerp perp;
+    R4Usdc usdc;
+    address alice = address(0xA11CE);
+    address settler = address(0xB0B);
+
+    function setUp() public {
+        vm.warp(1_800_000_000);
+        usdc = new R4Usdc();
+        perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100);
+        vm.etch(WRITER, address(new R4Writer()).code);
+        _setPrice(800_000);
+        _setCore(0);
+
+        usdc.mint(address(this), 1_000_000e6);
+        usdc.approve(address(perp), type(uint256).max);
+        perp.fund(20_000e6);
+        usdc.mint(alice, 1_000_000e6);
+        vm.prank(alice);
+        usdc.approve(address(perp), type(uint256).max);
+    }
+
+    function _setPrice(uint64 px) internal {
+        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(px));
+        vm.mockCall(BBO, abi.encode(BTC), abi.encode(px - px / 20_000, px + px / 20_000));
+    }
+
+    function _setCore(int64 lots) internal {
+        vm.mockCall(USER_EXISTS, abi.encode(address(perp)), abi.encode(true));
+        vm.mockCall(POSITION, abi.encode(address(perp), uint16(BTC)), abi.encode(Core.Position(lots, 0, 0, 20, false)));
+    }
+
+    function _openLong() internal returns (uint256 id) {
+        vm.prank(alice);
+        id = perp.requestOpen(true, 1_000e6, 10); // 0.125 BTC = 12,500 lots
+        vm.warp(block.timestamp + 2);
+        perp.settleOpen(id);
+    }
+
+    function test_poc_adlPositionMoveIsNotAnIocAcknowledgement() public {
+        _openLong();
+        perp.hedge(); // delayed buy from szi = 0
+
+        // The pending IOC has not run.  Core liquidates/ADLs one lot of the pool account.
+        // szi moved, but that movement is not evidence that the queued IOC was processed.
+        _setCore(1);
+        assertTrue(perp.pendingCloid() != 0, "foreign szi move is treated as this IOC completing");
+        perp.hedge();
+
+        // The old delayed buy and this new buy can both still execute.
+        assertEq(R4Writer(WRITER).count(), 1, "a foreign Core position change released a second IOC");
+    }
+
+    function test_poc_timeoutDoesNotCancelACoreWriterAction() public {
+        _openLong();
+        perp.hedge(); // delayed buy from szi = 0
+
+        // No Core state change means the action may simply still be queued, not rejected.
+        // At each timeout the contract sends another identical buy.
+        vm.warp(block.timestamp + 60);
+        perp.hedge();
+        vm.warp(block.timestamp + 60);
+        perp.hedge();
+
+        assertEq(R4Writer(WRITER).count(), 1, "timeout permits arbitrarily many queued IOCs");
+    }
+
+    function test_poc_keeperCanHoldCloseUntilTheLastTwoSeconds() public {
+        uint256 id = _openLong();
+        perp.hedge(); // a zero-fill/rejected/delayed IOC remains in flight
+        vm.prank(alice);
+        perp.requestClose(id);
+
+        // A third party cannot settle at the normal two-second settle delay.
+        vm.warp(block.timestamp + perp.SETTLE_DELAY());
+        vm.prank(settler);
+        perp.settleClose(id);
+    }
+}

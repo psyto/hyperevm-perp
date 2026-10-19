@@ -40,8 +40,6 @@ contract HedgedPerp {
     uint64 public constant SETTLE_WINDOW = 15; // seconds; after this the trader can cancel
     uint256 public constant HEDGE_SLIP_BPS = 30; // IOC limit beyond the best bid/ask
     uint256 public constant HEDGE_MAX_ORACLE_BPS = 100; // and never further than this from the oracle
-    uint64 public constant ORDER_TIMEOUT = 60; // seconds an unconfirmed order blocks the next one
-    uint64 public constant SETTLE_LAST = 2; // the last seconds of a settle window never wait for an order
     uint256 public constant MIN_HEDGE_USD = 12e6; // HyperCore rejects orders under $10
 
     IToken public immutable usdc; // 6 decimals
@@ -81,11 +79,11 @@ contract HedgedPerp {
     uint256 public longUnits;
     uint256 public shortUnits;
     uint256 public maxProfits; // sum of open positions' profit caps
-    // The one order that may be unconfirmed: sent at `orderSentAt` from Core position `orderFrom`.
-    // It is confirmed once the Core position differs from `orderFrom` (only this pool's orders
-    // move it), and given up on after ORDER_TIMEOUT with no change (review r3).
-    uint64 public orderSentAt;
-    int256 public orderFrom;
+    // The one hedge order that may be outstanding. The EVM cannot see when a CoreWriter order is
+    // done (a position change is no proof: Core liquidations and ADL move it too, review r4), so
+    // the keeper acknowledges it after reading its status by cloid from the Hyperliquid API.
+    uint128 public pendingCloid; // 0 = none
+    uint128 public lastCloid;
 
     event Requested(uint256 indexed id, address indexed owner, bool open);
     event Opened(uint256 indexed id, uint256 price, uint256 units);
@@ -93,7 +91,8 @@ contract HedgedPerp {
     event Liquidated(uint256 indexed id, address indexed by, uint256 price, int256 equity, uint256 reward);
     event Cancelled(uint256 indexed id);
     event Claimed(address indexed to, uint256 amount);
-    event Hedged(bool isBuy, uint256 lots, uint64 limitPx8, int256 targetLots, int256 coreLots);
+    event Hedged(uint128 indexed cloid, bool isBuy, uint256 lots, uint64 limitPx8, int256 targetLots, int256 coreLots);
+    event Acknowledged(uint128 indexed cloid);
     event Funded(uint256 amount);
     event Defunded(uint256 amount);
 
@@ -195,7 +194,6 @@ contract HedgedPerp {
         Position storage p = positions[id];
         if (p.state != State.Opening) revert BadState();
         _checkWindow(p.requestedAt);
-        _waitForOrder(p.requestedAt);
         uint256 price = guardedPrice();
         uint256 units = p.notional * 1e30 / price; // 1e6 USDC * 1e30 / 1e18 price = 1e18 units
         if (units == 0) revert BadRequest();
@@ -216,7 +214,6 @@ contract HedgedPerp {
         Position storage p = positions[id];
         if (p.state != State.Closing) revert BadState();
         _checkWindow(p.requestedAt);
-        _waitForOrder(p.requestedAt);
         uint256 price = guardedPrice();
         int256 pnl = _pnl(p, price) - int256(_fee(p.notional));
         int256 cap = int256(p.margin * MAX_PROFIT_X);
@@ -248,12 +245,13 @@ contract HedgedPerp {
 
     /// Order the gap between what traders hold, net, and the pool's Core position. One IOC, at
     /// most maxHedgeLots, limit HEDGE_SLIP_BPS beyond the touch and within HEDGE_MAX_ORACLE_BPS
-    /// of the oracle. Never while the previous order is unconfirmed (orderInFlight), so at most
-    /// one order is ever outstanding unless Core holds an action for over ORDER_TIMEOUT.
+    /// of the oracle, with a fresh cloid. Never while the previous order is unacknowledged, so
+    /// one order at most is outstanding. Settles do not wait for it: an order can run after
+    /// traders' exposure moved, and then points the wrong way by at most its size.
     function hedge() external onlyKeeper returns (int256 sent) {
         // Core drops actions from an account that does not exist yet (review r1)
         if (!Core.userExists(address(this))) revert NoCoreAccount();
-        if (orderInFlight()) revert OrderInFlight();
+        if (pendingCloid != 0) revert OrderInFlight();
         int256 target = targetLots();
         int256 cur = coreLots();
         int256 gap = target - cur;
@@ -266,11 +264,20 @@ contract HedgedPerp {
         uint256 usd = lots * 10 ** (18 - szDecimals) * oracle / 1e30;
         if (usd < MIN_HEDGE_USD) revert HedgeTooSmall(usd);
         uint64 sz8 = uint64(lots * 10 ** (8 - szDecimals));
-        Core.limitOrder(perpIndex, isBuy, px8, sz8, false, Core.TIF_IOC, 0);
-        orderSentAt = uint64(block.timestamp);
-        orderFrom = cur;
+        uint128 cloid = ++lastCloid;
+        Core.limitOrder(perpIndex, isBuy, px8, sz8, false, Core.TIF_IOC, cloid);
+        pendingCloid = cloid;
         sent = isBuy ? int256(lots) : -int256(lots);
-        emit Hedged(isBuy, lots, px8, target, cur);
+        emit Hedged(cloid, isBuy, lots, px8, target, cur);
+    }
+
+    /// The keeper has seen order `cloid` reach a final status on Core (filled, cancelled or
+    /// rejected), or seen that Core never registered it. Only then may hedge() send another.
+    /// Acknowledging early can put two orders on Core; that risks only Core money.
+    function acknowledge(uint128 cloid) external onlyKeeper {
+        if (cloid == 0 || cloid != pendingCloid) revert BadRequest();
+        pendingCloid = 0;
+        emit Acknowledged(cloid);
     }
 
     // ---------------------------------------------------------------- keeper: money
@@ -321,11 +328,6 @@ contract HedgedPerp {
         uint256 m = HLPrecompiles.mark(perpIndex, szDecimals);
         if (o == 0 || m == 0) revert NoPrice();
         return long ? (o > m ? o : m) : (o < m ? o : m);
-    }
-
-    /// The last order is neither seen on Core (the position still equals orderFrom) nor timed out.
-    function orderInFlight() public view returns (bool) {
-        return orderSentAt != 0 && block.timestamp < orderSentAt + ORDER_TIMEOUT && coreLots() == orderFrom;
     }
 
     /// Traders' net position in Core lots (szDecimals units), rounded to the nearest lot. The
@@ -380,13 +382,6 @@ contract HedgedPerp {
         if (amount == 0) return;
         credit[to] += amount;
         owed += amount;
-    }
-
-    /// While a hedge order is unconfirmed, settles wait, so it does not run against exposure
-    /// that has already moved. Per request and capped: the window's last SETTLE_LAST seconds
-    /// are always open, so hedging cannot hold a close back (review r3).
-    function _waitForOrder(uint64 requestedAt) internal view {
-        if (block.timestamp < requestedAt + SETTLE_WINDOW - SETTLE_LAST && orderInFlight()) revert OrderInFlight();
     }
 
     function _checkWindow(uint64 requestedAt) internal view {

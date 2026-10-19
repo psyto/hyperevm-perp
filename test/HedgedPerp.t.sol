@@ -118,6 +118,15 @@ contract HedgedPerpTest is Test {
         perp.settleClose(id);
     }
 
+    function _lastCloid() internal view returns (uint128 cloid) {
+        bytes memory raw = WriterRecorder(WRITER).last();
+        bytes memory args = new bytes(raw.length - 4);
+        for (uint256 i; i < args.length; i++) {
+            args[i] = raw[i + 4];
+        }
+        (,,,,,, cloid) = abi.decode(args, (uint32, bool, uint64, uint64, bool, uint8, uint128));
+    }
+
     function _lastOrder()
         internal
         view
@@ -396,63 +405,56 @@ contract HedgedPerpTest is Test {
         assertEq(sz, 0.025e8);
     }
 
-    /// At most one unconfirmed order: repeated calls send nothing until Core shows a change
-    /// (review r3: three calls 10 s apart used to send three orders).
-    function test_oneUnconfirmedOrder() public {
+    /// One outstanding order: nothing else goes out until the keeper acknowledges it, however
+    /// long it takes or however the Core position moves (reviews r3, r4).
+    function test_oneOutstandingOrderUntilAcknowledged() public {
         _open(alice, true, 1_000e6, 10);
         perp.hedge();
-        for (uint256 i; i < 3; i++) {
-            vm.warp(block.timestamp + 15);
-            vm.expectRevert(HedgedPerp.OrderInFlight.selector);
-            perp.hedge();
-        }
+        assertEq(perp.pendingCloid(), 1);
+        vm.warp(block.timestamp + 3600);
+        _setCore(true, 3_000, 500e6, 0); // moved (fill? ADL?): not proof
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.hedge();
         assertEq(WriterRecorder(WRITER).count(), 1);
-        _setCore(true, 12_500, 500e6, 0); // filled
-        assertFalse(perp.orderInFlight());
-        vm.expectRevert(HedgedPerp.NothingToHedge.selector);
+        perp.acknowledge(1);
         perp.hedge();
-    }
-
-    function test_partialFillConfirmsAndTheRestIsOrdered() public {
-        _open(alice, true, 1_000e6, 10);
-        perp.hedge();
-        _setCore(true, 5_000, 500e6, 0); // part filled: confirmed
-        perp.hedge();
+        assertEq(perp.pendingCloid(), 2);
         (,,, uint64 sz,,) = _lastOrder();
-        assertEq(sz, 0.075e8);
+        assertEq(sz, 0.095e8, "the gap from what Core shows now");
     }
 
-    function test_unfilledOrderGivenUpAfterTimeout() public {
+    function test_ordersCarryFreshCloids() public {
         _open(alice, true, 1_000e6, 10);
         perp.hedge();
-        vm.warp(block.timestamp + 59);
-        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        assertEq(_lastCloid(), 1);
+        perp.acknowledge(1);
         perp.hedge();
-        vm.warp(block.timestamp + 1);
-        perp.hedge();
-        assertEq(WriterRecorder(WRITER).count(), 2);
+        assertEq(_lastCloid(), 2);
     }
 
-    /// Settles wait for an unconfirmed order, but never past the window's last 2 s.
-    function test_settleWaitsForOrderButNotForever() public {
+    function test_acknowledgeOnlyThePendingOrder() public {
+        _open(alice, true, 1_000e6, 10);
+        vm.expectRevert(HedgedPerp.BadRequest.selector);
+        perp.acknowledge(0);
+        perp.hedge();
+        vm.expectRevert(HedgedPerp.BadRequest.selector);
+        perp.acknowledge(2);
+        vm.prank(alice);
+        vm.expectRevert(HedgedPerp.NotKeeper.selector);
+        perp.acknowledge(1);
+        perp.acknowledge(1);
+        vm.expectRevert(HedgedPerp.BadRequest.selector);
+        perp.acknowledge(1);
+    }
+
+    /// Settles never wait for the hedge, so the keeper cannot hold them (review r4).
+    function test_settlesDoNotWaitForTheHedge() public {
         _open(alice, true, 1_000e6, 10);
         vm.prank(bob);
         uint256 id = perp.requestOpen(false, 100e6, 10);
         perp.hedge();
         vm.warp(block.timestamp + 2);
-        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
-        perp.settleOpen(id);
-        vm.warp(block.timestamp + 11); // requestedAt + 13: the last 2 s
-        perp.settleOpen(id);
-    }
-
-    function test_settleProceedsOnceOrderSeen() public {
-        _open(alice, true, 1_000e6, 10);
         vm.prank(bob);
-        uint256 id = perp.requestOpen(false, 100e6, 10);
-        perp.hedge();
-        vm.warp(block.timestamp + 2);
-        _setCore(true, 12_500, 500e6, 0);
         perp.settleOpen(id);
     }
 
@@ -460,7 +462,6 @@ contract HedgedPerpTest is Test {
         uint256 id = _open(alice, true, 100e6, 20);
         _open(bob, true, 1_000e6, 10);
         perp.hedge();
-        assertTrue(perp.orderInFlight());
         _setPrice(762_000);
         perp.liquidate(id);
     }
