@@ -30,8 +30,9 @@ so do not deploy it with real money.
   record of what the hedge holds; it reads Core each time.
 - **Liquidation never refuses a price.** Liquidatable when equity is below 2.5% of notional at
   the price better for the trader: the higher of oracle and mark for a long, the lower for a
-  short. One feed moving alone liquidates no one; a real move moves both. The equity left goes
-  to the caller; a shortfall is the pool's.
+  short. One feed moving alone liquidates no one, and a wide or empty book does not block it; a
+  move counts only once both show it (see Known limits). The equity left goes to the caller; a
+  shortfall is the pool's.
 - **Payouts never depend on Core.** Profits are capped at 5× margin, and a position opens only
   while the pool's EVM USDC alone covers every open position's cap. Core money is the hedge's
   and is not counted. Payouts are credits, claimed from the EVM balance.
@@ -55,6 +56,12 @@ so do not deploy it with real money.
   outstanding order can run after exposure moved and point the wrong way, by at most its size.
   Core liquidations or ADL of the hedge move the Core position on their own; the next hedge
   orders the gap from what Core shows.
+- **Liquidation can be held back.** A move against a trader counts only once both the oracle and
+  the mark show it. The mark follows HL's book, so a trader (or anyone) who pushes the BTC book
+  their way keeps the liquidation price on their side for as long as they pay to hold the push;
+  a real move the mark lags waits the same way. Meanwhile the loss can pass the margin, and the
+  pool pays the shortfall. Neither delay is measured or bounded here (hl-price-guard
+  docs/safe-limits.md section 5).
 - **Capital-hungry.** Because payouts do not count Core money, the EVM must hold 5× every open
   margin.
 - **Not handled:** funding (traders pay none; the hedge pays or receives Core's), basis (traders
