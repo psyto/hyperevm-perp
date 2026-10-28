@@ -592,14 +592,14 @@ def cycle5(ctx):
         opn()
         t = time.monotonic()
         book = info({"type": "l2Book", "coin": COIN})
-        snap = {"line": "book5", "cycle": ctx["cycle"], "send_wall": round(time.time(), 3),
+        snap = {"line": "book5", "pool": ctx["pool"], "chain": 998, "cycle": ctx["cycle"], "send_wall": round(time.time(), 3),
                 "took": round(time.monotonic() - t, 3), "book": book}
         side_levels = book["levels"][1 if close_buy else 0]
         touch = side_levels[0] if side_levels else None
         snap["touch"] = touch
         write5(snap)
         if touch is None or lots(touch["sz"]) >= LOTS:
-            write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch})
+            write5({"line": "skip", "pool": ctx["pool"], "chain": 998, "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch})
             close("cleanup")
             return
         # the touch is a price Core itself quotes, so it is already on BTC's tick (review s5i1 #2);
@@ -607,7 +607,7 @@ def cycle5(ctx):
         try:
             tpx = px8(touch["px"])
         except ValueError as e:
-            write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch, "why": str(e)})
+            write5({"line": "skip", "pool": ctx["pool"], "chain": 998, "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch, "why": str(e)})
             close("cleanup")
             return
         F, after, _ = order5(ctx, "close-partial", "rawIocReduceOnly", close_buy, tpx, LOTS, None,
@@ -723,7 +723,7 @@ def lag(pool, n):
              call_pc(ORACLE_PC, "0x" + enc_uint(PERP))]
     for i in range(n):
         ts = time.monotonic()
-        row = {"line": "lag", "i": i, "evm_first": i % 2 == 0}
+        row = {"line": "lag", "pool": ctx["pool"], "chain": 998, "i": i, "evm_first": i % 2 == 0}
 
         def evm():
             a = time.monotonic()
