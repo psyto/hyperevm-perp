@@ -1,0 +1,13 @@
+The original three high findings are addressed. One s5 medium remains open, and the revised method adds a new high-risk measurement assumption.
+
+VERDICT: CHANGES
+
+1. **High — historical `0x800` backfill is not validated.** The metric treats `eth_call` at old block numbers as historical precompile state ([spec lines 72–75](docs/step5-close-from-evm-spec.md:72)), but this repo documents that the public RPC ignores block numbers for a precompile call to `0x807` ([safe-limits.md](lib/hl-price-guard/docs/safe-limits.md:105)). If `0x800` behaves similarly, every backfilled read observes current Core state, so the claimed “first visible block” and interval are invalid. Gate the method on a demonstrated `0x800` historical-state test across known old/new positions; otherwise report first live observation with query-time bounds, not a backfilled block.
+
+2. **Medium — the independently changed-position race from s5 is still not exercised.** `close-flat`, `close-over`, and `close-wrongside` begin in their respective states; they do not start from a measured position and then have Core change it during the CoreWriter delay. The spec expressly excludes provoking that race ([lines 44–47, 125–128](docs/step5-close-from-evm-spec.md:44)). Keep it explicitly untested rather than calling its outcomes covered, or add a controlled race case.
+
+3. **Medium — `close-partial` is selected by a stale-book predicate, not an observed partial fill.** A touch smaller at send time does not ensure partial execution: the book can change or replenish. Require `userFills` for that cloid to show `0 < filled size < pre-close position`, with a raw/timed book snapshot; otherwise classify it as zero-fill, full-fill, or indeterminate—not `close-partial`. Its effective sample size and any confidence bound must use observed partials, not attempts.
+
+4. **Medium — reliability bounds need the actual per-side and non-skipped denominators.** Results are reported per kind and side, but several cells are only 5 or 10 trials ([lines 88–96, 114–116](docs/step5-close-from-evm-spec.md:88)). Report each cell’s denominator and bound: zero failures in 5 trials has an exact one-sided 95% upper bound of about 45%, not the 5–30% examples shown.
+
+5. **Low — the stated 4.5 bp fee needs an explicit basis.** Mainnet fees vary by user/tier and applicable discounts; label 4.5 bp as the base-tier assumption with an as-of date, or retrieve/report `userFees` for a named reference account. [Hyperliquid fee schedule](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees)
