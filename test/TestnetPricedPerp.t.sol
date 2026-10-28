@@ -73,6 +73,8 @@ contract TestnetPricedPerpTest is Test {
         perp.setPrice(2);
         vm.expectRevert(HedgedPerp.NotKeeper.selector);
         perp.rawIoc(true, 1e8, 1000);
+        vm.expectRevert(HedgedPerp.NotKeeper.selector);
+        perp.rawIocReduceOnly(true, 1e8, 1000);
         vm.stopPrank();
     }
 
@@ -87,5 +89,67 @@ contract TestnetPricedPerpTest is Test {
         perp.acknowledge(c);
         perp.rawIoc(true, 70_000e8, 1000);
         assertEq(WriterRecorder(WRITER).count(), 2);
+    }
+
+    struct Order {
+        uint32 asset;
+        bool isBuy;
+        uint64 px;
+        uint64 sz;
+        bool reduceOnly;
+        uint8 tif;
+        uint128 cloid;
+    }
+
+    function _order(bytes memory a) internal pure returns (Order memory o) {
+        assertEq(uint8(a[0]), 1, "version");
+        assertEq(uint24(bytes3(abi.encodePacked(a[1], a[2], a[3]))), 1, "limit order action");
+        bytes memory args = new bytes(a.length - 4);
+        for (uint256 i; i < args.length; i++) args[i] = a[i + 4];
+        (o.asset, o.isBuy, o.px, o.sz, o.reduceOnly, o.tif, o.cloid) =
+            abi.decode(args, (uint32, bool, uint64, uint64, bool, uint8, uint128));
+    }
+
+    /// Step 5: the reduce-only twin sets the flag and nothing else differs.
+    function test_reduceOnlyFlagIsEncoded() public {
+        vm.chainId(998);
+        TestnetPricedPerp perp = new TestnetPricedPerp(IToken(address(usdc)), 3, 5, 100, 1);
+        uint128 c1 = perp.rawIoc(false, 79_000e8, 15_000);
+        Order memory o1 = _order(WriterRecorder(WRITER).last());
+        assertFalse(o1.reduceOnly, "rawIoc is not reduce-only");
+        perp.acknowledge(c1);
+        uint128 c2 = perp.rawIocReduceOnly(false, 79_000e8, 15_000);
+        Order memory o2 = _order(WriterRecorder(WRITER).last());
+        assertTrue(o2.reduceOnly, "rawIocReduceOnly is reduce-only");
+        assertEq(o2.asset, 3);
+        assertEq(o2.asset, o1.asset);
+        assertEq(o2.isBuy, o1.isBuy);
+        assertEq(o2.px, o1.px);
+        assertEq(o2.sz, o1.sz);
+        assertEq(o2.tif, o1.tif);
+        assertEq(o1.cloid, c1);
+        assertEq(o2.cloid, c2);
+    }
+
+    /// Step 5: the twin shares the one slot and the cloid sequence with rawIoc and hedge orders.
+    function test_reduceOnlySharesTheSlotAndSequence() public {
+        vm.chainId(998);
+        TestnetPricedPerp perp = new TestnetPricedPerp(IToken(address(usdc)), 3, 5, 100, 1);
+        uint128 c1 = perp.rawIoc(true, 70_000e8, 1000);
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.rawIocReduceOnly(false, 70_000e8, 1000);
+        perp.acknowledge(c1);
+        uint128 c2 = perp.rawIocReduceOnly(false, 70_000e8, 1000);
+        assertEq(c2, (uint128(1) << 127) | 2, "one sequence for both");
+        assertEq(perp.pendingCloid(), c2);
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.rawIoc(true, 70_000e8, 1000);
+        vm.expectRevert(HedgedPerp.OrderInFlight.selector);
+        perp.rawIocReduceOnly(false, 70_000e8, 1000);
+        vm.expectRevert();
+        perp.acknowledge(c1); // the old cloid does not clear the new one
+        assertEq(perp.pendingCloid(), c2);
+        perp.acknowledge(c2);
+        assertEq(perp.pendingCloid(), 0);
     }
 }

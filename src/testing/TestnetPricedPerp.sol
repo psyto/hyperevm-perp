@@ -12,7 +12,8 @@ import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 /// sizes (and so the real hedge) come from it (review r6); liquidation takes the set price as is.
 /// The hedge trades the real Core book at real prices. Also sends one raw IOC on request, to
 /// measure what orderStatus returns for a CoreWriter order that does not fill; it takes the same
-/// one-outstanding-order slot as hedge() (review r6). Never deploy this anywhere real: the keeper
+/// one-outstanding-order slot as hedge() (review r6). Its reduce-only twin measures closing the
+/// pool's Core position from the EVM (step 5). Never deploy this anywhere real: the keeper
 /// can set any liquidation price and liquidate anyone.
 contract TestnetPricedPerp is HedgedPerp {
     uint256 internal constant HYPEREVM_TESTNET = 998;
@@ -26,7 +27,7 @@ contract TestnetPricedPerp is HedgedPerp {
     error NotTestnet(uint256 chainId);
     error SettlePriceOff(uint256 price, uint256 oracle);
 
-    event RawOrder(uint128 indexed cloid, bool isBuy, uint64 limitPx8, uint64 sz8);
+    event RawOrder(uint128 indexed cloid, bool isBuy, uint64 limitPx8, uint64 sz8, bool reduceOnly);
 
     constructor(IToken usdc_, uint32 perpIndex_, uint8 szDecimals_, uint256 maxHedgeLots_, uint256 price_)
         HedgedPerp(usdc_, perpIndex_, szDecimals_, maxHedgeLots_, 100, 100, 100)
@@ -55,10 +56,21 @@ contract TestnetPricedPerp is HedgedPerp {
     /// One IOC exactly as given (8-decimal price and size). It holds pendingCloid like a hedge
     /// order, so it is acknowledged the same way and never runs alongside one.
     function rawIoc(bool isBuy, uint64 limitPx8, uint64 sz8) external onlyKeeper returns (uint128 cloid) {
+        return _rawIoc(isBuy, limitPx8, sz8, false);
+    }
+
+    /// The same order with reduce-only set (step 5): same slot, same cloid sequence, same
+    /// acknowledgement. Used for every close and recovery close, so a position Core changed in
+    /// the meantime can never be increased or flipped by it.
+    function rawIocReduceOnly(bool isBuy, uint64 limitPx8, uint64 sz8) external onlyKeeper returns (uint128 cloid) {
+        return _rawIoc(isBuy, limitPx8, sz8, true);
+    }
+
+    function _rawIoc(bool isBuy, uint64 limitPx8, uint64 sz8, bool reduceOnly) internal returns (uint128 cloid) {
         if (pendingCloid != 0) revert OrderInFlight();
         cloid = RAW_CLOID_BIT | ++rawCount;
         pendingCloid = cloid;
-        Core.limitOrder(perpIndex, isBuy, limitPx8, sz8, false, Core.TIF_IOC, cloid);
-        emit RawOrder(cloid, isBuy, limitPx8, sz8);
+        Core.limitOrder(perpIndex, isBuy, limitPx8, sz8, reduceOnly, Core.TIF_IOC, cloid);
+        emit RawOrder(cloid, isBuy, limitPx8, sz8, reduceOnly);
     }
 }
