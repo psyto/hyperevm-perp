@@ -17,9 +17,11 @@ so do not deploy it with real money.
   testnet-only copy whose price the keeper sets (`docs/step4-liquidation-and-rejections.md`).
 - An order recorder (`recorder/orders.py`, reviews rec1–rec3 APPROVE) is built but has not been
   run on testnet yet.
-- Step 5 is specified, not built (2026-10-29, review s5h APPROVE): how stale a contract's view of
-  its own Core position is, and how quickly and reliably it can flatten that position with
-  reduce-only orders sent through CoreWriter (`docs/step5-close-from-evm-spec.md`).
+- Step 5 is specified and built, not run (2026-10-29; spec s5h APPROVE, implementation s5i5
+  APPROVE): how stale a contract's view of its own Core position is, and how quickly and reliably
+  it can flatten that position with reduce-only orders sent through CoreWriter
+  (`docs/step5-close-from-evm-spec.md`). The testnet copy gained `rawIocReduceOnly`; the
+  recorder's `unwind` is now reduce-only.
 
 ## How it works
 - **One market, BTC on testnet.** Traders post USDC margin (up to 20x) and go long or short.
@@ -91,13 +93,13 @@ about 2 s.
 | Path | What |
 |---|---|
 | `src/HedgedPerp.sol` | the market |
-| `src/testing/TestnetPricedPerp.sol` | testnet only (refuses any chain but 998): keeper-set price for liquidation, settles within 1% of the real oracle, a raw IOC for measuring `orderStatus` |
-| `test/` | 44 tests; precompiles and CoreWriter mocked at their real addresses |
+| `src/testing/TestnetPricedPerp.sol` | testnet only (refuses any chain but 998): keeper-set price for liquidation, settles within 1% of the real oracle, a raw IOC (and its reduce-only twin) for measuring `orderStatus` and closes |
+| `test/` | 46 tests; precompiles and CoreWriter mocked at their real addresses |
 | `docs/design.md` | the design and what is left |
 | `docs/step3-testnet.md` | the hedged round trip on testnet |
 | `docs/step4-liquidation-and-rejections.md` | liquidation, `perpMarginRejected`, `iocCancelRejected`; all four order outcomes and their timings |
 | `docs/step5-close-from-evm-spec.md` | spec only: precompile visibility of a contract's Core position, reduce-only close latency and outcomes, a read-only mainnet book estimate |
-| `recorder/orders.py` | testnet order recorder: sends raw IOCs one at a time, records every `orderStatus` change by cloid, fails closed |
+| `recorder/orders.py` | testnet order recorder: sends raw IOCs one at a time, records every `orderStatus` change by cloid, fails closed; step 5 commands `g1`, `step5`, `lag`, and `book` (mainnet, read only) |
 | `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r6.md`; recorder rec1–rec3; step 5 spec s5–s5h) |
 | `script/big_blocks.py` | big blocks on/off for the deployer (deployment needs ~2.8M gas, over the 2M small block) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
@@ -127,11 +129,12 @@ Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 | 5 | acknowledgement | 1 high (procedure) | never acknowledge on `unknownOid` |
 | 6, 6b | the testnet-only copy | 1 medium, 1 low; then APPROVE | the raw IOC takes the one order slot; settle price within 1% of the oracle |
 | rec1–rec3 | the order recorder | CHANGES twice; then APPROVE | fails closed on any surprise; `status` and `unwind` for manual recovery |
-| s5–s5h | step 5 spec (no code) | 4 high, 16 medium, 3 low over s5–s5g; s5h APPROVE | reduce-only for every close and recovery; a gate on whether historical `0x800` reads work; local-clock brackets only; per-order acknowledge table |
+| s5–s5h | step 5 spec | 4 high, 16 medium, 3 low over s5–s5g; s5h APPROVE | reduce-only for every close and recovery; a gate on whether historical `0x800` reads work; local-clock brackets only; per-order acknowledge table |
+| s5i1–s5i5 | step 5 implementation | 5 medium, 5 low over s5i1–s5i4; s5i5 APPROVE | G1 strict per block and bound to its pool; exact price and size conversion; read pace with degraded brackets; slot re-read before every acknowledgement; base fee schedule recorded |
 
 ## Next
-- Step 5: add the testnet-only `rawIocReduceOnly`, switch the recorder's `unwind` to it, extend
-  the recorder as the spec says, review, then run on testnet (gate G1 first).
+- Step 5 on testnet: deploy the new testnet copy, run `g1`, then `step5` over at least three
+  sessions on different days, `lag`, and a week of `book` on mainnet (read only); write it up.
 - A full arithmetic audit round, as hyperevm-lend's r8 did.
 - Funding passed through to traders, accrued per second.
 - A keeper that polls `orderStatus` and acknowledges by itself (by hand on testnet so far).
