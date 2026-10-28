@@ -1,0 +1,15 @@
+The Solidity change is sound: `_rawIoc` preserves the existing raw-order slot, raw-cloid sequence, and exact-cloid acknowledgement behavior; the tests cover the new flag and shared slot. Every Step 5 automated close uses `rawIocReduceOnly`.
+
+1. **Medium — G1 is neither enforced nor strong enough to authorize pinned reads.** [`step5()`](recorder/orders.py:598) proceeds when `g1.json` is absent. Worse, G1 records a pre-open head as `a` and passes if *any* block in `[a,c)` has `LOTS`, rather than using the actual open/close receipt blocks and requiring each tested block to equal its expected state. That can incorrectly enable pinned-read measurements. Fix the gate requirement and validate every block against receipt-derived A/C expectations.
+
+2. **Medium — `px8()` is not exact, and `close-partial` skips valid fractional touches.** [`px8()`](recorder/orders.py:331) silently truncates non-zero precision beyond eight decimals. [`close-partial`](recorder/orders.py:570) then rejects any non-whole-dollar touch, despite BTC allowing a decimal price and the spec requiring exact px8 conversion. Reject unrepresentable input rather than truncate, and pass a validated price8 through `order5`; apply valid five-significant-figure tick handling without converting a valid touch into a skip or `tickRejected`.
+
+3. **Medium — the live/pinned RPC budget has no headroom.** Three RPC operations every 1.8 s is exactly 100 requests/minute, before the concurrent block-timestamp and `pendingCloid` calls in [`order5()`](recorder/orders.py:465), and pinned reads also run at that exact ceiling. A rate-limited live request is recorded as an error, which preserves evidence, but produces a sampling gap and therefore a wider/possibly unusable observed bracket. Use a lower default or shared limiter, and mark brackets spanning failed samples as degraded/excluded.
+
+4. **Low — the mainnet book record is incomplete against the method.** [`book()`](recorder/orders.py:724) keeps the raw book and send wall time, but not an explicit receive wall time or the coin’s asset index. The required fee/date/link reporting is also not captured. The VWAP/depth walk itself correctly uses bids for long closes and asks for short closes.
+
+5. **Low — `unwind` does not validate the terminal response payload before acknowledgement.** It queries the sent cloid and checks `pendingCloid` immediately after sending, but unlike `order5`, it does not verify that the returned order payload itself carries that cloid/order identity before acknowledging. Tighten it to the same strict response and immediately-pre-ack slot check as `order5`.
+
+No reviewed path can make a Step 5 close increase or flip Core exposure: closes and recovery use reduce-only, and unexpected observed status/position outcomes in `order5` stop with the slot locked. Forge tests could not be run here because the read-only sandbox denies Foundry’s cache write; `git diff --check` was clean.
+
+VERDICT: CHANGES

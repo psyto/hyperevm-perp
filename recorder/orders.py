@@ -270,10 +270,14 @@ def unwind(pool):
         if after["szi"] == 0:
             break
         time.sleep(0.5)
+    o_ = (r or {}).get("order", {}).get("order", {})
+    same = (o_.get("cloid"), o_.get("coin"), o_.get("side"), lots(o_.get("origSz", "0"))) == \
+        ("0x%032x" % cloid, COIN, "B" if is_buy else "A", sz8 // 10**(8 - SZ_DEC))
     write({"line": "unwind", "pool": pool, "tx": tx, "cloid": "0x%032x" % cloid, "changes": changes,
            "final": final, "response": r, "pos_before": before, "pos_after": after})
     print("unwind", final, after)
-    if final == "filled" and after["szi"] == 0:
+    if final == "filled" and after["szi"] == 0 and same and \
+            int(cast("call", "-r", RPC, pool, "pendingCloid()(uint128)").split()[0]) == cloid:
         send(pool, key_env(), "acknowledge(uint128)", cloid)
     else:
         sys.exit("not flat: left unacknowledged, check `status`")
@@ -293,10 +297,11 @@ ORACLE_PC = "0x0000000000000000000000000000000000000807"
 MARGIN_PC = "0x000000000000000000000000000000000000080f"
 PERP = 3  # testnet BTC
 # The public EVM RPC allows about 100 requests a minute; a batch of three probably counts as three.
-# 1.8 s keeps the live stream inside that; the first session's error count shows whether a shorter
-# period holds (STEP5_LIVE_POLL). Pinned reads (2-3 calls each) run after the stream, as slowly.
-LIVE_POLL = float(os.environ.get("STEP5_LIVE_POLL", "1.8"))
-PINNED_POLL = 1.8
+# 2.5 s (72/min) leaves room for order5's own calls (review s5i1 #3); the first session's error
+# count shows whether a shorter period holds (STEP5_LIVE_POLL). Pinned reads (up to 3 calls) run
+# after the stream at the same pace. A bracket that spans a failed read is marked degraded.
+LIVE_POLL = float(os.environ.get("STEP5_LIVE_POLL", "2.5"))
+PINNED_POLL = 2.5
 LIVE_FOR = 30
 LIVE_MAX = 90
 FILLS_EVERY = 2
@@ -329,8 +334,11 @@ def lots(s):
 
 
 def px8(s):
-    """Exact 1e8 integer from a decimal price string."""
+    """Exact 1e8 integer from a decimal price string; anything finer than 1e-8 is refused, not
+    truncated (review s5i1 #2)."""
     whole, _, frac = s.strip().partition(".")
+    if len(frac) > 8 and int(frac[8:]) != 0:
+        raise ValueError("finer than 1e-8: " + s)
     return int(whole) * 10**8 + int((frac + "0" * 8)[:8])
 
 
@@ -446,7 +454,7 @@ def pinned(pool, block, target, ts_limit):
         time.sleep(PINNED_POLL)
 
 
-def order5(ctx, label, fn, is_buy, px, sz, expect_status, expect_after):
+def order5(ctx, label, fn, is_buy, px_8, sz, expect_status, expect_after):
     """One order under the acknowledge table (review s5f #2). expect_status None = record whatever
     terminal status comes back; expect_after = lots after, or a function of the fill total F.
     Anything unexpected stops the run with the slot locked."""
@@ -457,10 +465,10 @@ def order5(ctx, label, fn, is_buy, px, sz, expect_status, expect_after):
         sys.exit("pool has open orders on Core")
     before = read_szi(pool)
     row = {"line": "order5", "cycle": ctx["cycle"], "kind": ctx["kind"], "side": ctx["side"], "label": label,
-           "fn": fn, "is_buy": is_buy, "limit": px, "sz_lots": sz, "before": before, "oracle": oracle()}
+           "fn": fn, "is_buy": is_buy, "limit_px8": px_8, "sz_lots": sz, "before": before, "oracle": oracle()}
     sig = fn + "(bool,uint64,uint64)"
     stream, done = [], threading.Event()
-    tx, sent_at, rc = send(pool, env, sig, str(is_buy).lower(), px * 10**8, sz * 10**(8 - SZ_DEC))
+    tx, sent_at, rc = send(pool, env, sig, str(is_buy).lower(), px_8, sz * 10**(8 - SZ_DEC))
     t0 = time.monotonic()  # receipt arrival, local clock
     th = threading.Thread(target=live_stream, args=(pool, t0, stream, done), daemon=True)
     th.start()
@@ -507,7 +515,7 @@ def order5(ctx, label, fn, is_buy, px, sz, expect_status, expect_after):
     if pending != cloid:
         stop5(row, "pendingCloid after send is not this order's cloid")
     if (o_.get("cloid"), o_.get("coin"), o_.get("side"), lots(o_.get("origSz", "0")), px8(o_.get("limitPx", "0"))) != \
-            (row["cloid"], COIN, "B" if is_buy else "A", sz, px * 10**8):
+            (row["cloid"], COIN, "B" if is_buy else "A", sz, px_8):
         stop5(row, "order does not match what was sent")
     if expect_status is not None and final != expect_status:
         stop5(row, "expected %s, got %s" % (expect_status, final))
@@ -515,12 +523,30 @@ def order5(ctx, label, fn, is_buy, px, sz, expect_status, expect_after):
         stop5(row, "fills indeterminate")
     if after is None or after != want_after:
         stop5(row, "position %s, expected %s" % (after, want_after))
+    if after != before:  # question 3(b) only counts position-changing orders (review s5g #2)
+        row["bracket"] = bracket(stream, after)
+    else:
+        row["bracket"] = "target already present at receipt"
     if ctx["g1"] and after != before:
         row["pinned"] = pinned(pool, blk, after, row["block_ts"] + LIVE_FOR)
+    if int(cast("call", "-r", RPC, pool, "pendingCloid()(uint128)").split()[0]) != cloid:
+        stop5(row, "pendingCloid changed before acknowledgement")
     write5(row)
     send(pool, env, "acknowledge(uint128)", cloid)
     print(json.dumps({k: row.get(k) for k in ("cycle", "kind", "side", "label", "final", "F", "class", "after")}), flush=True)
-    return F, after
+    return F, after, blk
+
+
+def bracket(stream, target):
+    """First live read showing `target`, the last read before it that did not, and whether any
+    failed read lies between them (then the bracket is degraded, review s5i1 #3)."""
+    hit = next((i for i, x in enumerate(stream) if x.get("szi") == target), None)
+    if hit is None:
+        return {"hit": None}
+    miss = next((i for i in range(hit - 1, -1, -1) if "szi" in stream[i]), None)
+    errs = sum(1 for x in stream[(miss if miss is not None else -1) + 1:hit] if "error" in x)
+    return {"first_hit": stream[hit], "last_miss": stream[miss] if miss is not None else None,
+            "errors_between": errs, "degraded": errs > 0 or miss is None}
 
 
 def stop5(row, why):
@@ -530,7 +556,7 @@ def stop5(row, why):
 
 
 def through(is_buy):
-    return px5(oracle() * (1.01 if is_buy else 0.99))
+    return px5(oracle() * (1.01 if is_buy else 0.99)) * 10**8
 
 
 def cycle5(ctx):
@@ -550,7 +576,7 @@ def cycle5(ctx):
         opn(); close()
     elif k == "close-tight":
         opn()
-        wrong = px5(oracle() * (0.85 if close_buy else 1.15))
+        wrong = px5(oracle() * (0.85 if close_buy else 1.15)) * 10**8
         order5(ctx, "close-tight", "rawIocReduceOnly", close_buy, wrong, LOTS, "iocCancelRejected", s * LOTS)
         close("close-second")
     elif k == "close-partial":
@@ -567,13 +593,9 @@ def cycle5(ctx):
             write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch})
             close("cleanup")
             return
-        tpx = px8(touch["px"])
-        if tpx % 10**8:
-            write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch, "why": "fractional touch"})
-            close("cleanup")
-            return
-        F, after = order5(ctx, "close-partial", "rawIocReduceOnly", close_buy, tpx // 10**8, LOTS, None,
-                          lambda F: s * (LOTS - (F or 0)))
+        # the touch is a price Core itself quotes, so it is already on BTC's tick (review s5i1 #2)
+        F, after, _ = order5(ctx, "close-partial", "rawIocReduceOnly", close_buy, px8(touch["px"]), LOTS, None,
+                             lambda F: s * (LOTS - (F or 0)))
         if after != 0:
             close("close-residual", abs(after))
     elif k == "close-flat":
@@ -609,6 +631,8 @@ def step5(pool, cycles, seed=None):
         items = [[k, s] for (k, s), n in sorted(PLAN.items()) for _ in range(n)]
         random.Random(seed).shuffle(items)
         plan = {"seed": seed, "items": items, "done": 0}
+    if not os.path.exists(G1_FILE):
+        sys.exit("run `g1` first: its result decides how question 1 is measured (review s5i1 #1)")
     ctx = testnet_ctx(pool)
     write5({"line": "session", "start": round(time.time(), 3), "sntp": sntp(), "seed": plan["seed"],
             "done": plan["done"], "g1": ctx["g1"]})
@@ -628,33 +652,40 @@ def step5(pool, cycles, seed=None):
 
 
 def g1(pool):
-    """Gate G1: open at block A, close at block C, then read 0x800 pinned at blocks before A,
-    between A and C, and after C. Historical reads are accepted only if each block reads what it
-    should have had: 0 before A, the open size somewhere in [A, C), 0 after."""
+    """Gate G1 (review s5i1 #1): open (receipt block A), close (receipt block C), then read 0x800
+    pinned at every block from A - 5 to C + 15. Historical reads are accepted only if every read
+    succeeds and the series is exactly: 0 before A; one switch to the open size at some block in
+    [A, A + 10]; the open size until one switch back to 0 at some block in [C, C + 10]; 0 to the
+    end. An RPC that answers with the current state (0) everywhere fails, as does any other shape."""
     ctx = testnet_ctx(pool)
     ctx.update({"cycle": "g1", "kind": "g1", "side": 1, "g1": False})
     if read_szi(ctx["pool"]) != 0:
         sys.exit("G1 needs a flat position")
-    a = int(rpc("eth_blockNumber"), 16)
-    order5(ctx, "g1-open", "rawIoc", True, through(True), LOTS, "filled", LOTS)
-    order5(ctx, "g1-close", "rawIocReduceOnly", False, through(False), LOTS, "filled", 0)
-    c = int(rpc("eth_blockNumber"), 16)
-    while int(rpc("eth_blockNumber"), 16) <= c + 1:
+    _, _, a = order5(ctx, "g1-open", "rawIoc", True, through(True), LOTS, "filled", LOTS)
+    _, _, c = order5(ctx, "g1-close", "rawIocReduceOnly", False, through(False), LOTS, "filled", 0)
+    end = c + 15
+    while int(rpc("eth_blockNumber"), 16) <= end:
         time.sleep(2)
     reads = []
-    for b in [a - 1] + list(range(a, c)) + [c + 1]:
+    for b in range(a - 5, end + 1):
         try:
             reads.append([b, read_szi(ctx["pool"], hex(b))])
         except Exception as e:
             reads.append([b, "error:" + repr(e)[:80]])
-        time.sleep(0.7)
+        time.sleep(1.0)
     vals = [v for _, v in reads]
-    passed = (vals[0] == 0 and LOTS in vals[1:-1] and vals[-1] == 0 and all(isinstance(v, int) for v in vals))
-    res = {"passed": passed, "a": a, "c": c, "reads": reads, "at": round(time.time(), 3)}
+    blocks = [b for b, _ in reads]
+    ok = all(isinstance(v, int) for v in vals)
+    if ok:
+        up = next((b for b, v in reads if v == LOTS), None)
+        down = next((b for b, v in reads if up is not None and b > up and v == 0), None)
+        ok = (up is not None and down is not None and a <= up <= a + 10 and c <= down <= c + 10
+              and all(v == (LOTS if up <= b < down else 0) for b, v in reads))
+    res = {"passed": ok, "a": a, "c": c, "reads": reads, "at": round(time.time(), 3)}
     with open(G1_FILE, "w") as f:
         json.dump(res, f)
     write5({"line": "g1", **res})
-    print("G1", "passed" if passed else "failed: question 1 uses live reads only")
+    print("G1", "passed" if ok else "failed: question 1 uses live reads only")
 
 
 def lag(pool, n):
@@ -715,6 +746,12 @@ def book(minutes, hours, coins):
     A displayed-book estimate, not an executable close cost; fees are not included."""
     every, start = minutes * 60, time.monotonic()
     ticks = int(hours * 3600 // every)
+    meta = post(MAINNET_INFO, {"type": "meta"})
+    index = {a["name"]: i for i, a in enumerate(meta["universe"])}
+    write5({"line": "book_session", "start_wall": round(time.time(), 3), "coins": coins,
+            "asset_index": {c: index.get(c) for c in coins}, "every_s": every, "ticks": ticks,
+            "fee_basis": "fees are not in these figures; the write-up adds the base-tier taker rate read on its "
+                         "date from https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees"}, BOOK_OUT)
     for i in range(ticks):
         due = start + i * every
         now = time.monotonic()
@@ -731,7 +768,8 @@ def book(minutes, hours, coins):
                 continue
             took = round(time.monotonic() - a, 3)
             bids, asks = bk["levels"]
-            row = {"line": "book", "tick": i, "coin": coin, "send_wall": round(aw, 3), "took": took, "raw": bk}
+            row = {"line": "book", "tick": i, "coin": coin, "asset_index": index.get(coin), "send_wall": round(aw, 3),
+                   "recv_wall": round(time.time(), 3), "took": took, "raw": bk}
             if bids and asks:
                 mid = (float(bids[0]["px"]) + float(asks[0]["px"])) / 2
                 row["mid"] = mid
