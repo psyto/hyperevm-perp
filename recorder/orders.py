@@ -421,12 +421,21 @@ def fills_total(pool, oid):
     return sum(lots(f["sz"]) for f in fs), fs
 
 
-def g1_passed():
+def g1_result(pool):
+    """The G1 result for this pool on testnet, or None if G1 has not run for it (review s5i2 #1)."""
     try:
         with open(G1_FILE) as f:
-            return json.load(f).get("passed") is True
+            g = json.load(f)
     except FileNotFoundError:
-        return False
+        return None
+    return g if g.get("pool") == pool.lower() and g.get("chain") == 998 else None
+
+
+def require_g1(pool):
+    g = g1_result(pool)
+    if g is None:
+        sys.exit("run `g1 %s` first: G1 comes before any step 5 run (review s5i1 #1, s5i2 #1)" % pool)
+    return g["passed"] is True
 
 
 def pinned(pool, block, target, ts_limit):
@@ -593,8 +602,15 @@ def cycle5(ctx):
             write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch})
             close("cleanup")
             return
-        # the touch is a price Core itself quotes, so it is already on BTC's tick (review s5i1 #2)
-        F, after, _ = order5(ctx, "close-partial", "rawIocReduceOnly", close_buy, px8(touch["px"]), LOTS, None,
+        # the touch is a price Core itself quotes, so it is already on BTC's tick (review s5i1 #2);
+        # one that cannot be represented is recorded and the position closed (review s5i2 #2)
+        try:
+            tpx = px8(touch["px"])
+        except ValueError as e:
+            write5({"line": "skip", "cycle": ctx["cycle"], "kind": k, "side": s, "touch": touch, "why": str(e)})
+            close("cleanup")
+            return
+        F, after, _ = order5(ctx, "close-partial", "rawIocReduceOnly", close_buy, tpx, LOTS, None,
                              lambda F: s * (LOTS - (F or 0)))
         if after != 0:
             close("close-residual", abs(after))
@@ -614,7 +630,7 @@ def cycle5(ctx):
 def testnet_ctx(pool):
     if int(cast("chain-id", "-r", RPC)) != 998:
         sys.exit("not testnet")
-    return {"pool": pool.lower(), "env": key_env(), "topics": raw_topics(), "g1": g1_passed()}
+    return {"pool": pool.lower(), "env": key_env(), "topics": raw_topics(), "g1": False}
 
 
 def step5(pool, cycles, seed=None):
@@ -631,9 +647,9 @@ def step5(pool, cycles, seed=None):
         items = [[k, s] for (k, s), n in sorted(PLAN.items()) for _ in range(n)]
         random.Random(seed).shuffle(items)
         plan = {"seed": seed, "items": items, "done": 0}
-    if not os.path.exists(G1_FILE):
-        sys.exit("run `g1` first: its result decides how question 1 is measured (review s5i1 #1)")
+    passed = require_g1(pool)
     ctx = testnet_ctx(pool)
+    ctx["g1"] = passed
     write5({"line": "session", "start": round(time.time(), 3), "sntp": sntp(), "seed": plan["seed"],
             "done": plan["done"], "g1": ctx["g1"]})
     for _ in range(cycles):
@@ -681,7 +697,7 @@ def g1(pool):
         down = next((b for b, v in reads if up is not None and b > up and v == 0), None)
         ok = (up is not None and down is not None and a <= up <= a + 10 and c <= down <= c + 10
               and all(v == (LOTS if up <= b < down else 0) for b, v in reads))
-    res = {"passed": ok, "a": a, "c": c, "reads": reads, "at": round(time.time(), 3)}
+    res = {"passed": ok, "pool": ctx["pool"], "chain": 998, "a": a, "c": c, "reads": reads, "at": round(time.time(), 3)}
     with open(G1_FILE, "w") as f:
         json.dump(res, f)
     write5({"line": "g1", **res})
@@ -691,6 +707,7 @@ def g1(pool):
 def lag(pool, n):
     """Question 2: with a position open, n paired readings of 0x80F / 0x807 and the info API,
     at least 15 s apart, in alternating order, every request timed. Differences only."""
+    require_g1(pool)
     ctx = testnet_ctx(pool)
     ctx.update({"cycle": "lag", "kind": "lag", "side": 1})
     if read_szi(ctx["pool"]) != 0:
@@ -748,10 +765,15 @@ def book(minutes, hours, coins):
     ticks = int(hours * 3600 // every)
     meta = post(MAINNET_INFO, {"type": "meta"})
     index = {a["name"]: i for i, a in enumerate(meta["universe"])}
+    # the base tier as Hyperliquid reports it (feeSchedule, read for the zero address, whose own
+    # rate already differs from the base); not any real account's rate (review s5i2 #3)
+    fees = post(MAINNET_INFO, {"type": "userFees", "user": "0x" + "0" * 40}).get("feeSchedule", {})
     write5({"line": "book_session", "start_wall": round(time.time(), 3), "coins": coins,
             "asset_index": {c: index.get(c) for c in coins}, "every_s": every, "ticks": ticks,
-            "fee_basis": "fees are not in these figures; the write-up adds the base-tier taker rate read on its "
-                         "date from https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees"}, BOOK_OUT)
+            "fee_basis": {"read_wall": round(time.time(), 3), "base_taker_cross": fees.get("cross"),
+                          "base_maker_add": fees.get("add"), "source": "info userFees feeSchedule",
+                          "schedule": "https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees",
+                          "note": "impact figures exclude fees; base tier, real accounts may pay less"}}, BOOK_OUT)
     for i in range(ticks):
         due = start + i * every
         now = time.monotonic()
