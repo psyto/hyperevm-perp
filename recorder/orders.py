@@ -473,7 +473,7 @@ def order5(ctx, label, fn, is_buy, px_8, sz, expect_status, expect_after):
     if info({"type": "openOrders", "user": pool}):
         sys.exit("pool has open orders on Core")
     before = read_szi(pool)
-    row = {"line": "order5", "cycle": ctx["cycle"], "kind": ctx["kind"], "side": ctx["side"], "label": label,
+    row = {"line": "order5", "pool": pool, "chain": 998, "cycle": ctx["cycle"], "kind": ctx["kind"], "side": ctx["side"], "label": label,
            "fn": fn, "is_buy": is_buy, "limit_px8": px_8, "sz_lots": sz, "before": before, "oracle": oracle()}
     sig = fn + "(bool,uint64,uint64)"
     stream, done = [], threading.Event()
@@ -641,17 +641,21 @@ def step5(pool, cycles, seed=None):
             plan = json.load(f)
         if seed is not None and seed != plan["seed"]:
             sys.exit("a plan with seed %s exists" % plan["seed"])
+        if plan.get("pool") != pool.lower() or plan.get("chain") != 998:
+            sys.exit("the plan belongs to pool %s: move it aside to start one for this pool (review s5i3)" % plan.get("pool"))
     else:
         if seed is None:
             sys.exit("first session: give a seed")
         items = [[k, s] for (k, s), n in sorted(PLAN.items()) for _ in range(n)]
         random.Random(seed).shuffle(items)
-        plan = {"seed": seed, "items": items, "done": 0}
+        plan = {"seed": seed, "pool": pool.lower(), "chain": 998, "items": items, "done": 0}
     passed = require_g1(pool)
     ctx = testnet_ctx(pool)
     ctx["g1"] = passed
+    g = g1_result(pool)
     write5({"line": "session", "start": round(time.time(), 3), "sntp": sntp(), "seed": plan["seed"],
-            "done": plan["done"], "g1": ctx["g1"]})
+            "pool": ctx["pool"], "chain": 998, "done": plan["done"],
+            "g1": {"passed": g["passed"], "at": g["at"], "a": g["a"], "c": g["c"]}})
     for _ in range(cycles):
         if plan["done"] >= len(plan["items"]):
             print("plan complete")
@@ -664,7 +668,7 @@ def step5(pool, cycles, seed=None):
         with open(tmp, "w") as f:
             json.dump(plan, f)
         os.replace(tmp, PLAN_FILE)
-    write5({"line": "session_end", "end": round(time.time(), 3), "sntp": sntp(), "done": plan["done"]})
+    write5({"line": "session_end", "pool": ctx["pool"], "end": round(time.time(), 3), "sntp": sntp(), "done": plan["done"]})
 
 
 def g1(pool):
