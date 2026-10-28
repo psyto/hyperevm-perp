@@ -13,3 +13,5 @@ Test counts quoted in Codex's outputs include its own PoCs.
 | [r4](r4.md) | the rebuild; keeper acknowledgement by cloid |
 | [r5](r5.md) | acknowledgement procedure (with web search) |
 | [r6](r6.md) | the testnet-only copy; r6b APPROVE |
+| rec1–rec3 | `recorder/orders.py`; rec3 APPROVE (payloads and outputs only) |
+| s5–s5h | `docs/step5-close-from-evm-spec.md`, a spec with no code yet; s5h APPROVE. Payloads and outputs only: each round's fixes are in the spec itself, whose status line names the rounds. Local paths in the outputs were removed |
