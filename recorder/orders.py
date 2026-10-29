@@ -145,7 +145,13 @@ def track(pool, cloid, t0):
 def send(pool, env, sig, *args):
     """cast send --async; the hash is written before waiting so a crash leaves a trace."""
     sent_at = time.time()
-    tx = cast("send", "--async", "-r", RPC, pool, sig, *map(str, args), env=env)
+    # cast 1.7 no longer reads ETH_PRIVATE_KEY, so the key goes on the command line; a failure
+    # prints cast's stderr only, never the command (which holds the key)
+    r = subprocess.run(["cast", "send", "--async", "-r", RPC, "--private-key", env["ETH_PRIVATE_KEY"], pool, sig,
+                        *map(str, args)], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit("cast send %s failed: %s" % (sig, r.stderr.strip()[-400:]))
+    tx = r.stdout.strip()
     write({"line": "sent", "pool": pool, "sig": sig, "args": list(map(str, args)), "tx": tx, "sent_at": round(sent_at, 3)})
     deadline = time.monotonic() + 60
     while True:

@@ -116,7 +116,7 @@ the real hedge, come from it; liquidation takes the set price as is. A raw IOC f
 order exactly as given, through the same one-outstanding-order slot, to measure `orderStatus`.
 The constructor refuses any chain but 998 (review r6).
 
-Step 5 (`docs/step5-close-from-evm-spec.md`, specified, not built) adds one testnet-only function,
+Step 5 (`docs/step5-close-from-evm-spec.md`) adds one testnet-only function,
 `rawIocReduceOnly`: the same slot, cloid sequence and acknowledgement as the raw IOC, with
 reduce-only set. It measures closing a contract's Core position from the EVM; it does not change
 `HedgedPerp`, whose liquidation still only removes EVM exposure and leaves the next `hedge()` to
