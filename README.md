@@ -17,8 +17,10 @@ so do not deploy it with real money.
   testnet-only copy whose price the keeper sets (`docs/step4-liquidation-and-rejections.md`).
 - An order recorder (`recorder/orders.py`, reviews rec1–rec3 APPROVE) is built but has not been
   run on testnet yet.
-- Step 5 is specified and built, not run (2026-10-29; spec s5h APPROVE, implementation s5i5
-  APPROVE): how stale a contract's view of its own Core position is, and how quickly and reliably
+- Step 5 is specified and built, and testnet session 1 ran (2026-10-29; spec s5h APPROVE,
+  implementation s5i5, amendments s5i7b APPROVE): G1 failed (historical `0x800` reads return the
+  current state), and session 1 stopped at cycle 22 of 120 when the testnet book drifted over 1%
+  from the oracle: how stale a contract's view of its own Core position is, and how quickly and reliably
   it can flatten that position with reduce-only orders sent through CoreWriter
   (`docs/step5-close-from-evm-spec.md`). The testnet copy gained `rawIocReduceOnly`; the
   recorder's `unwind` is now reduce-only.
@@ -131,10 +133,11 @@ Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 | rec1–rec3 | the order recorder | CHANGES twice; then APPROVE | fails closed on any surprise; `status` and `unwind` for manual recovery |
 | s5–s5h | step 5 spec | 4 high, 16 medium, 3 low over s5–s5g; s5h APPROVE | reduce-only for every close and recovery; a gate on whether historical `0x800` reads work; local-clock brackets only; per-order acknowledge table |
 | s5i1–s5i5 | step 5 implementation | 5 medium, 5 low over s5i1–s5i4; s5i5 APPROVE | G1 strict per block and bound to its pool; exact price and size conversion; read pace with degraded brackets; slot re-read before every acknowledgement; base fee schedule recorded |
+| s5i6, s5r1, s5i7–s5i7b | signing fix; testnet session 1 | s5i6 APPROVE; s5r1 and s5i7 CHANGES, s5i7b APPROVE | `--private-key` for cast 1.7; opens 2% through (the testnet book drifted >1%); `ackopen` for a stopped open; first-read matches are upper bounds; every session ends on record |
 
 ## Next
-- Step 5 on testnet: deploy the new testnet copy, run `g1`, then `step5` over at least three
-  sessions on different days, `lag`, and a week of `book` on mainnet (read only); write it up.
+- Step 5 on testnet: sessions 2 and 3 of `step5` on other days (98 cycles left), `lag`; the week of
+  mainnet `book` runs until 2026-11-05 (read only); write it up.
 - A full arithmetic audit round, as hyperevm-lend's r8 did.
 - Funding passed through to traders, accrued per second.
 - A keeper that polls `orderStatus` and acknowledges by itself (by hand on testnet so far).

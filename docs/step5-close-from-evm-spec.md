@@ -1,6 +1,6 @@
 # Step 5 (spec): seeing and closing a contract's Core position from the EVM
 
-Status: spec, revised after reviews s5 to s5g (CHANGES). Nothing here has been built or sent.
+Status: spec s5h APPROVE, built (s5i5 APPROVE); amended after testnet session 1 (review s5r1, below).
 
 Steps 3 and 4 showed that a CoreWriter order reaches a final `orderStatus` within about 2 s. Step 5
 asks the next question: if a contract's Core perp position backs something on the EVM side, how far
@@ -141,6 +141,35 @@ Extend `recorder/orders.py`:
 - `book <coin...>`: question 5, mainnet info API only, to `recorder/data/book.jsonl`, raw snapshot
   included.
 - Kinds and sides are run in a random order (seed recorded).
+
+## Amendments after session 1 (review s5r1)
+Session 1 (2026-10-29): G1 failed (all 55 historical reads 0), so question 1 uses live reads only.
+The run stopped at cycle 22 of 120 when an opening `rawIoc` 1% through the oracle found nothing:
+the testnet book sat over 1% above the oracle. These apply from session 2:
+- **Opens go 2% through the oracle** (`open`, `g1-open`, `lag-open`); every close and recovery
+  close stays at 1% (the measured quantity). Every order row records `through_bps`: 200 for opens,
+  100 for closes, -1500 for close-tight's first close (15% the wrong way), `"touch"` for
+  close-partial's touch-priced close. Session 1 rows have no such field; all of them ran at 100
+  (recorder 2e62211), which a `session1_manifest` row in `step5.jsonl` states. Opening data at 1%
+  and 2% are reported apart, never pooled. Closes are unaffected; opening fill price and fees are.
+- **A stopped open is recovered with `ackopen`**, the only manual acknowledgement. It requires: the
+  pending cloid is the last order row's cloid; that row is an opening `rawIoc`, stopped only because
+  its status was not `filled`, with a zero-fill, agreed fill count and a flat position before; the
+  status is terminal; and two reads `FILLS_EVERY` s apart each show zero `userFills` for its oid, a
+  flat position and no open orders. The checks are written to `step5.jsonl` (`manual_ack`) before
+  the acknowledgement is sent, and the transaction after (`manual_ack_sent`). Anything else stays for
+  a person. Session 1's cycle-22 open was acknowledged by hand after the status, open-order and
+  position checks (the zero fill count is in its stopped row), before this command existed; it is
+  recorded as `manual_ack_retro` (transaction hash not captured) and excluded from every count.
+- **Brackets.** Reads start at the receipt. When the first read already shows the target, the result
+  is an upper bound from the receipt to that read, labelled "no observed post-receipt non-match",
+  not a failed bracket. Otherwise the bracket is the last non-matching and the first matching read
+  (about 2.5 s apart at the current pace). The pace stays at 2.5 s (three calls a read, about 72
+  requests a minute against the RPC's 100).
+- **Sessions end on record**: `session_end` is written on completion, a stop, or an exception, with
+  the reason, and a failure to write it never replaces the stop being reported. A killed process
+  (SIGKILL, power loss) leaves none. Session 1 ended before this; its end is recorded as
+  `session_end_retro`. The clock check uses `sntp`, or `chronyc tracking` on the AWS host.
 
 ## Runs
 Testnet BTC perp (index 3), 0.00015 BTC per position (about 12 USD), same key as steps 3-4. Spread
