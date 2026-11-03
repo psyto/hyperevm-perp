@@ -25,6 +25,39 @@ so do not deploy it with real money.
   (`docs/step5-close-from-evm-spec.md`). The testnet copy gained `rawIocReduceOnly`; the
   recorder's `unwind` is now reduce-only.
 
+## What you can take from this repo
+For a library that wraps CoreWriter and the precompiles, use [hyper-evm-lib](https://github.com/hyperliquid-dev/hyper-evm-lib); to read HL prices safely, [hl-price-guard](https://github.com/fabrknt/hl-price-guard). This repo is a worked example: code to copy from, and what happened when it ran on testnet.
+
+| I want to… | Look at |
+|---|---|
+| hedge a pool's net exposure on HyperCore from a contract | `HedgedPerp.hedge`: read the Core position, send one IOC for the gap |
+| know whether a CoreWriter order is done | "Why the hedge's acknowledgement is off-chain" below: three on-chain answers that broke, and `acknowledge(cloid)` from the info API |
+| see every outcome a CoreWriter perp order can have, with timings | `docs/step4-liquidation-and-rejections.md` (`filled`, `iocCancelRejected`, `perpMarginRejected`) |
+| settle trades so neither trader nor keeper gets a free option | `requestOpen` / `settleOpen`: anyone settles 2–15 s later at the checked oracle |
+| liquidate without letting a wide book block it | `HedgedPerp.liquidationPrice`: the price better for the trader of oracle and mark |
+| record CoreWriter orders on testnet and fail closed | `recorder/orders.py` |
+| deploy a contract over the 2M small-block gas limit | `script/big_blocks.py` (big blocks on, deploy, off) |
+
+## Run
+```bash
+git clone --recurse-submodules https://github.com/psyto/hyperevm-perp && cd hyperevm-perp
+forge test
+```
+46 tests: HyperCore precompiles and CoreWriter are mocked at their real addresses, so nothing touches a network.
+
+## Measured on testnet (2026-10-19)
+- A CoreWriter perp order is found in `orderStatus` by its cloid: `unknownOid` for under a
+  second, then `filled`, `iocCancelRejected` or `perpMarginRejected`. A margin-rejected order is
+  registered, not missing.
+- A contract's Core account starts with no perp margin; an order then is rejected
+  (`perpMarginRejected`), not dropped silently.
+- Deploying a ~14 KB contract needs big blocks (`evmUserModify`); turn them off afterwards, since
+  every transaction from the address then waits for a big block.
+- Basis shows up even on a quiet book: trader entry at the oracle 82,874.0, hedge fill 82,904.0.
+  Core's taker fee was 4.5 bp a side, against the 10 bp charged to traders.
+- USDC EVM → Core through `CoreDepositWallet` did not arrive for an EOA either on 2026-10-19
+  (it did on 2026-10-17). HYPE's bridge worked, so USDC was made on Core by selling HYPE on spot.
+
 ## How it works
 - **One market, BTC on testnet.** Traders post USDC margin (up to 20x) and go long or short.
   The pool is every trader's counterparty.
@@ -106,19 +139,6 @@ about 2 s.
 | `script/big_blocks.py` | big blocks on/off for the deployer (deployment needs ~2.8M gas, over the 2M small block) |
 | `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
 
-## Things this taught (testnet, 2026-10-19)
-- A CoreWriter perp order is found in `orderStatus` by its cloid: `unknownOid` for under a
-  second, then `filled`, `iocCancelRejected` or `perpMarginRejected`. A margin-rejected order is
-  registered, not missing.
-- A contract's Core account starts with no perp margin; an order then is rejected
-  (`perpMarginRejected`), not dropped silently.
-- Deploying a ~14 KB contract needs big blocks (`evmUserModify`); turn them off afterwards, since
-  every transaction from the address then waits for a big block.
-- Basis shows up even on a quiet book: trader entry at the oracle 82,874.0, hedge fill 82,904.0.
-  Core's taker fee was 4.5 bp a side, against the 10 bp charged to traders.
-- USDC EVM → Core through `CoreDepositWallet` did not arrive for an EOA either on 2026-10-19
-  (it did on 2026-10-17). HYPE's bridge worked, so USDC was made on Core by selling HYPE on spot.
-
 ## Reviews
 Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 
@@ -142,12 +162,6 @@ Codex, adversarial, a failing test for every finding (`docs/reviews/`).
 - Funding passed through to traders, accrued per second.
 - A keeper that polls `orderStatus` and acknowledges by itself (by hand on testnet so far).
 - A way to send the pool's Core HYPE back to the EVM.
-
-## Run
-```
-git clone --recurse-submodules https://github.com/psyto/hyperevm-perp
-forge test
-```
 
 ## License
 Apache-2.0
