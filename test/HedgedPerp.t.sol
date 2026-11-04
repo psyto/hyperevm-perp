@@ -89,8 +89,8 @@ contract HedgedPerpTest is HLTest {
     }
 
     function _setQuote(uint64 oracle1, uint64 mark1, uint64 bid1, uint64 ask1) internal {
-        // Prices with 1 decimal, as the precompiles return them for BTC; HLTest takes 1e18.
-        setBook(BTC_PERP, uint256(oracle1) * 1e17, uint256(mark1) * 1e17, uint256(bid1) * 1e17, uint256(ask1) * 1e17);
+        // Prices with 1 decimal, as the precompiles return them for BTC.
+        setBookRaw(BTC_PERP, oracle1, mark1, bid1, ask1);
     }
 
     function _setCore(bool exists, int64 szi, int64 accountValue, uint64 spotUsdcWei) internal {
