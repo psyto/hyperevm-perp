@@ -137,7 +137,7 @@ about 2 s.
 | `recorder/orders.py` | testnet order recorder: sends raw IOCs one at a time, records every `orderStatus` change by cloid, fails closed; step 5 commands `g1`, `step5`, `lag`, and `book` (mainnet, read only) |
 | `docs/reviews/` | Codex review rounds: payloads, outputs, PoCs, and what was fixed (`r1.md`–`r6.md`; recorder rec1–rec3; step 5 spec s5–s5h) |
 | `script/big_blocks.py` | big blocks on/off for the deployer (deployment needs ~2.8M gas, over the 2M small block) |
-| `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads |
+| `lib/hyperevm-amm`, `lib/hl-price-guard` | pinned git submodules: CoreWriter/precompile helpers, guarded price reads (hl-price-guard `v0.3.0`; tests set prices with its `HLTest`) |
 
 ## Reviews
 Codex, adversarial, a failing test for every finding (`docs/reviews/`).

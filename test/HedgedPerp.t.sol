@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
 import {HedgedPerp, IToken} from "../src/HedgedPerp.sol";
 import {Core} from "hyperevm-amm/Core.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
+import {HLTest} from "hl-price-guard/test/HLTest.sol";
 
 contract MockUSDC {
     mapping(address => uint256) public balanceOf;
@@ -44,16 +44,14 @@ contract WriterRecorder {
     }
 }
 
-contract HedgedPerpTest is Test {
+contract HedgedPerpTest is HLTest {
     address constant POSITION = 0x0000000000000000000000000000000000000800;
     address constant SPOT_BALANCE = 0x0000000000000000000000000000000000000801;
-    address constant MARK_PX = 0x0000000000000000000000000000000000000806;
-    address constant ORACLE_PX = 0x0000000000000000000000000000000000000807;
-    address constant BBO = 0x000000000000000000000000000000000000080e;
     address constant MARGIN_SUMMARY = 0x000000000000000000000000000000000000080F;
     address constant USER_EXISTS = 0x0000000000000000000000000000000000000810;
     address constant WRITER = 0x3333333333333333333333333333333333333333;
     uint32 constant BTC = 3; // testnet; perp prices have 6 - szDecimals(5) = 1 decimal
+    HLPriceGuard.Asset BTC_PERP = HLPriceGuard.Asset({dex: 0, index: BTC, szDecimals: 5});
 
     HedgedPerp perp;
     MockUSDC usdc;
@@ -63,6 +61,7 @@ contract HedgedPerpTest is Test {
     address liquidator = address(0x11);
 
     function setUp() public {
+        installHL();
         vm.warp(1_800_000_000);
         usdc = new MockUSDC();
         perp = new HedgedPerp(IToken(address(usdc)), BTC, 5, 100_000, 100, 100, 100); // max 1 BTC per hedge
@@ -90,9 +89,8 @@ contract HedgedPerpTest is Test {
     }
 
     function _setQuote(uint64 oracle1, uint64 mark1, uint64 bid1, uint64 ask1) internal {
-        vm.mockCall(ORACLE_PX, abi.encode(BTC), abi.encode(oracle1));
-        vm.mockCall(MARK_PX, abi.encode(BTC), abi.encode(mark1));
-        vm.mockCall(BBO, abi.encode(BTC), abi.encode(bid1, ask1));
+        // Prices with 1 decimal, as the precompiles return them for BTC; HLTest takes 1e18.
+        setBook(BTC_PERP, uint256(oracle1) * 1e17, uint256(mark1) * 1e17, uint256(bid1) * 1e17, uint256(ask1) * 1e17);
     }
 
     function _setCore(bool exists, int64 szi, int64 accountValue, uint64 spotUsdcWei) internal {
